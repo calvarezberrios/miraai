@@ -1,0 +1,62 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Secrets & config — API keys for OpenAI/Anthropic, Twitch, YouTube, ElevenLabs, etc.
+.env
+.env.*
+*.key
+secrets.json
+config.local.json
+token.json
+credentials.json
+
+# AI models & weights (huge files, don't commit)
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.gguf
+*.ckpt
+*.bin
+
+# Audio / TTS output
+audio_output/
+tts_cache/
+recordings/
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# Logs & chat history
+logs/
+*.log
+chat_history/
+memory/
+*.db
+*.sqlite3
+
+# VTuber assets (if large — Live2D/VRM models can be hefty)
+# Uncomment if you don't want them in the repo:
+# assets/models/
+# *.vrm
+# *.model3.json
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Jupyter (if you experiment in notebooks)
+.ipynb_checkpoints/
