@@ -7,6 +7,7 @@ import brain.forebrain.subcortical_structures.limbic_system.amygdala as amygdala
 from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
     recall, observe, consolidate, summarize_session, last_session,
 )
+from brain.forebrain.cerebrum.frontal_lobe import brocas_area
 
 CONSOLIDATE_EVERY_MESSAGES = 95       # consolidate after this many messages...
 CONSOLIDATE_EVERY_SECONDS = 30 * 60   # ...or this long, whichever comes first
@@ -37,6 +38,7 @@ while True:
                 print("[Mira saved a recap of this session]\n")
         except Exception as e:
             print(f"[session summary skipped: {e}]\n")
+        brocas_area.wait_until_done()   # let her finish the last sentence before closing
         break
 
     feel(user_input)                              # amygdala updates mood
@@ -48,6 +50,7 @@ while True:
     remember_reply(reply)
     observe(user_input, reply)                    # feed consolidation buffer + session log
     print(f"Mira ({amygdala.mood}): {reply}\n")
+    brocas_area.say(reply)                        # use whatever variable holds her response text
 
     message_count += 2
     if (message_count >= CONSOLIDATE_EVERY_MESSAGES

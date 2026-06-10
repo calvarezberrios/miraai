@@ -60,4 +60,4 @@ memory_store/
 Thumbs.db
 
 # Jupyter (if you experiment in notebooks)
-.ipynb_checkpoints/
+.ipynb_checkpoints/test_out.wav
