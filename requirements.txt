@@ -1,0 +1,30 @@
+# Mira — Python dependencies
+# Install into a fresh venv:  python -m pip install -r requirements.txt
+#
+# NOTE: these are the PIP deps only. Install separately (see README):
+#   - ffmpeg  -> system binary on PATH (Discord voice playback needs it; NOT a pip package)
+#   - Ollama  -> the local LLM runtime (then: ollama pull qwen2.5:3b ; ollama pull nomic-embed-text)
+#   - GPT-SoVITS -> the voice engine, its own bundled Python, run as the api_v2 server
+
+# --- core ---
+openai                 # LLM + embeddings via Ollama's OpenAI-compatible API
+chromadb               # local vector store for long-term memory
+requests               # calls to the GPT-SoVITS API server
+sounddevice            # microphone capture + speaker playback (local mode)
+soundfile              # WAV decode / encode
+numpy                  # audio buffers / math  (if you hit numpy 2.x errors, pin numpy<2)
+
+# --- speech-to-text ---
+faster-whisper         # Whisper STT (CTranslate2 backend)
+
+# CUDA runtime libs CTranslate2 needs on Windows; registered at runtime by the DLL shim
+# at the top of wernickes_area.py. Required for GPU STT on Windows.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+
+# --- Discord (text + DAVE-encrypted voice) ---
+# Pinned to an in-progress py-cord build that decrypts received voice under Discord's
+# mandatory DAVE E2EE. Stable py-cord CANNOT do this yet, so DO NOT replace this with a
+# `pip install -U py-cord` -- that silently breaks voice receive. Unpin only once
+# voice-receive ships in a real py-cord release.
+py-cord[voice] @ git+https://github.com/Pycord-Development/pycord.git@820460aa4
