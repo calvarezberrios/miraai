@@ -1,10 +1,13 @@
 import argparse
+import datetime
+import shutil
 import sys
 import threading
 import time
 
-from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think, judge_relevance
+from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think, consider_speaking
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
+from brain.forebrain.subcortical_structures import hypothalamus
 from brain.forebrain.subcortical_structures.limbic_system.amygdala import feel, color
 import brain.forebrain.subcortical_structures.limbic_system.amygdala as amygdala
 from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
@@ -51,6 +54,9 @@ previous_session = last_session()     # recap of the prior run, if any
 if previous_session:
     print(f"[Mira remembers last time: {previous_session}]\n")
 
+# how long she's been away since anyone last talked to her (across the shutdown)
+_startup_last_active = hypothalamus.last_active()
+
 
 def run_consolidation():
     try:
@@ -61,9 +67,50 @@ def run_consolidation():
         print(f"[consolidation skipped: {e}]\n")
 
 
+_last_seen = {}   # chan_key -> timestamp of the previous inbound message
+
+
+def _humanize_gap(seconds):
+    if seconds < 90:
+        return "a moment ago"
+    minutes = seconds / 60.0
+    if minutes < 60:
+        return f"about {int(round(minutes))} minutes ago"
+    hours = minutes / 60.0
+    if hours < 24:
+        n = int(round(hours))
+        return f"about {n} hour{'s' if n != 1 else ''} ago"
+    days = int(round(hours / 24.0))
+    return f"about {days} day{'s' if days != 1 else ''} ago"
+
+
+def describe_situation(event, prev_seen, now):
+    """A short note about WHEN and WHERE this is happening, for the prompt."""
+    parts = []
+    dt = datetime.datetime.fromtimestamp(now)
+    parts.append("Right now it is " + dt.strftime("%A, %B %d, %Y, at %I:%M %p").lstrip("0") + ".")
+
+    if prev_seen is not None and now - prev_seen > 1:
+        parts.append("The previous message before this one came in " + _humanize_gap(now - prev_seen) + ".")
+
+    if getattr(event, "is_dm", False) or event.channel == "local":
+        parts.append(
+            "This is a private one-on-one conversation (a direct message). No one "
+            "else can see it, so do not act as if there is an audience or public chat watching."
+        )
+    elif str(event.channel).startswith("discord"):
+        parts.append(
+            "This is a public server channel where other people can see the "
+            "conversation and may join in."
+        )
+    return " ".join(parts)
+
+
 def handle_message(event, interrupting=False):
     global message_count, last_consolidation
     with turn_lock:
+        now = time.time()
+
         # She follows the whole room: every message updates short-term context,
         # whether or not she ends up replying to it.
         context = receive(event.text)
@@ -71,7 +118,17 @@ def handle_message(event, interrupting=False):
         chan_key = getattr(event.raw, "id", None)
         chan_key = str(chan_key) if chan_key is not None else event.channel
 
-        # Basal ganglia decides whether this one is hers to answer.
+        # silence tracking: gap since the previous message, then mark this one.
+        # On the first message after a restart, bridge from the persisted
+        # last-active time so she knows how long she was away.
+        prev_seen = _last_seen.get(chan_key)
+        if prev_seen is None and _startup_last_active is not None:
+            prev_seen = _startup_last_active
+        _last_seen[chan_key] = now
+        hypothalamus.touch(now)               # persist "last talked to" across restarts
+
+        # Is she being directly addressed? (name / @ / reply / DM)
+        addressed = False
         if not interrupting:
             decision = should_respond(
                 event.text,
@@ -79,24 +136,30 @@ def handle_message(event, interrupting=False):
                 reply_to_her=getattr(event, "reply_to_her", False),
                 channel=chan_key,
             )
-            respond = decision.respond
-            # un-addressed but conversation is live -> judge if it's a continuation
-            if not respond and decision.reason == "consider":
-                respond = judge_relevance(context)
-            if not respond:
-                if LOG_HEARD:
-                    print(f"[heard] {event.speaker}: {event.text}")
-                return
+            addressed = decision.respond and decision.reason == "addressed"
 
-        print(f"\n{event.speaker}: {event.text}")
-
+        # She reacts to the room and recalls regardless of whether she ends up
+        # speaking, so the autonomous decision has mood + memory to work with.
         feel(event.text)                              # amygdala updates mood
         memories = recall(event.text)                 # hippocampus -> long-term recall
         if previous_session:
             memories = [f"From our last session: {previous_session}"] + memories
 
         flavor = color() + (INTERRUPT_NOTE if interrupting else "")
-        reply = think(context, flavor, memories)
+        situation = describe_situation(event, prev_seen, now)
+
+        if interrupting or addressed:
+            # Directly addressed (or a long-ramble interrupt) -> she always answers.
+            reply = think(context, flavor, memories, situation=situation)
+        else:
+            # Not addressed -> she decides for herself whether to jump in.
+            reply = consider_speaking(context, flavor, memories, situation=situation)
+            if not reply:
+                if LOG_HEARD:
+                    print(f"[heard:quiet] {event.speaker}: {event.text}")
+                return
+
+        print(f"\n{event.speaker}: {event.text}")
         remember_reply(reply)
         observe(event.text, reply)
         print(f"Mira ({amygdala.mood}): {reply}\n")
@@ -123,7 +186,18 @@ def handle_message(event, interrupting=False):
 def on_event(ev):
     """Single entry point for everything the active adapter hears."""
     if ev.kind == PARTIAL:
-        print(f"\r[mic] {ev.text}{' ' * 8}", end="", flush=True)
+        # Live "dynamic subtitle": overwrite ONE line in place. Truncate to the
+        # terminal width (showing the most recent words) so a long sentence can't
+        # wrap onto extra lines and leave stacked-up copies behind. Pad-clear the
+        # rest of the line with spaces + '\r' so it works in a plain Windows console.
+        cols = shutil.get_terminal_size((100, 20)).columns
+        prefix = "[mic] "
+        avail = max(10, cols - len(prefix) - 1)
+        text = ev.text or ""
+        if len(text) > avail:
+            text = "..." + text[-(avail - 3):]      # keep the tail (newest words)
+        line = prefix + text
+        print("\r" + line + " " * max(0, cols - len(line) - 1), end="", flush=True)
     elif ev.kind == INTERRUPT:
         handle_message(ev, interrupting=True)
     else:  # FINAL
@@ -131,6 +205,11 @@ def on_event(ev):
 
 
 try:
+    if _startup_last_active is not None:
+        away = max(0.0, time.time() - _startup_last_active)
+        if away > 60:
+            print(f"[Mira's been away — last talked to {_humanize_gap(away)}]\n")
+
     adapter.start(on_event)
     adapter.warmup()    # heat up TTS so her first real reply is fast
 

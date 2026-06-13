@@ -30,7 +30,7 @@ NAME = "Mira"
 ALIASES = ()                  # extra names she answers to, e.g. ("mir", "foxy")
 
 # --- conversation continuity --------------------------------------------------
-ACTIVE_WINDOW_SEC = 180.0     # after she speaks, she stays "in the conversation"
+ACTIVE_WINDOW_SEC = 300.0     # after she speaks, she stays "in the conversation"
                               # this long, relevance-checking un-addressed messages
 
 # --- unprompted interjections -------------------------------------------------

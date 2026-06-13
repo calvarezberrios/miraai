@@ -35,6 +35,7 @@ class InputEvent:
     raw: Any = None              # underlying source object, if an adapter needs it
     mentioned: bool = False      # adapter signal: bot was @-mentioned / DM'd / local
     reply_to_her: bool = False   # adapter signal: this message replies to Mira
+    is_dm: bool = False          # adapter signal: private DM (no audience)
 
 
 # An adapter pushes events to this callback; the brain registers one handler.

@@ -10,6 +10,10 @@ Continuous listening with live partial transcripts.
   once with the partial transcript so Mira can butt in.
 - pause()/resume() let main.py mute the mic while Mira speaks,
   so she doesn't hear herself.
+
+Also exposes transcribe() so non-mic audio sources (e.g. the Discord
+voice adapter) can reuse the same Whisper model + CUDA setup without
+opening the microphone.
 """
 
 import queue
@@ -58,6 +62,16 @@ _thread = None
 _stream = None
 
 
+def _ensure_model():
+    """Load the Whisper model once (shared by the mic loop and transcribe())."""
+    global _model
+    if _model is None:
+        print("(wernicke) loading whisper model...")
+        _model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+        print("(wernicke) ready.")
+    return _model
+
+
 def _mic_callback(indata, frames, time_info, status):
     if _listening.is_set():
         _audio_q.put(indata[:, 0].copy())
@@ -74,13 +88,25 @@ def _transcribe(buf):
     return " ".join(s.text.strip() for s in segments).strip()
 
 
+def transcribe(audio):
+    """Transcribe a finalized utterance: 16 kHz mono float32 numpy array -> text.
+
+    For audio sources that do their own capture/endpointing (e.g. Discord voice).
+    Loads the shared model on first use; does NOT touch the microphone.
+    """
+    _ensure_model()
+    if audio is None or len(audio) == 0:
+        return ""
+    return _transcribe(np.asarray(audio, dtype=np.float32))
+
+
 def _worker(on_final, on_partial, on_interrupt):
     buf = np.zeros(0, dtype=np.float32)
     last_refresh = 0.0
     interrupted = False
 
     while _running:
-        
+
         if _flush.is_set():
             _flush.clear()
             buf = np.zeros(0, dtype = np.float32)
@@ -122,11 +148,8 @@ def _worker(on_final, on_partial, on_interrupt):
 
 def start(on_final, on_partial=None, on_interrupt=None):
     """Load the model, open the mic, begin listening."""
-    global _model, _running, _thread, _stream
-    if _model is None:
-        print("(wernicke) loading whisper model...")
-        _model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
-        print("(wernicke) ready.")
+    global _running, _thread, _stream
+    _ensure_model()
     _running = True
     _listening.set()
     _stream = sd.InputStream(
