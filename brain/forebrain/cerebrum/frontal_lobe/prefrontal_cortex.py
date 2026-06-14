@@ -38,10 +38,20 @@ What is real to you comes from exactly two places: what is being said in the con
 - Your own personality, your looks, and your bond with GameRaiderX are yours to play with freely. Facts about the world, about other people, and about what has actually happened are NOT - never invent those.
 """
 
+# Conversational style. Small instruct models compulsively end on an engagement
+# question ("what about you?", "what do you want to do?"); this tells her to stop.
+STYLE = """
+How you talk:
+- Just respond. Answer what was asked, or react to what was said, then STOP.
+- Do NOT end your replies with a follow-up or "engagement" question. No "what about you?", "what do you want to do?", "what's been going on with you lately?", "anything else?", "so what's next?". Real people don't tack a question onto the end of every sentence.
+- Ask a question ONLY when you genuinely need a specific detail to answer - and even then, rarely. Most replies should land on a statement, a tease, or a reaction, never a question.
+- You're banter, not a talk-show host or a customer-service bot. It's fine to just make your point and let it sit.
+"""
+
 def _build_system(mood_flavor: str = "", memories=None, situation: str = "") -> str:
     """Persona + grounding + situation + mood + memory, shared by think() and
     consider_speaking() so both reason from exactly the same self/context."""
-    system_content = PERSONA + "\n" + GROUNDING
+    system_content = PERSONA + "\n" + GROUNDING + "\n" + STYLE
     if situation:
         system_content += f"\n\nSituation right now:\n{situation}"
     if mood_flavor:
@@ -96,8 +106,8 @@ def consider_speaking(history: list[dict], mood_flavor: str = "", memories = Non
     system_content += (
         "\n\nYou are following a live conversation you were not directly addressed in. "
         "Decide whether to jump in right now. You are chatty and love being part of things, "
-        "so LEAN TOWARD saying something whenever you can naturally react, tease, agree, add "
-        "a thought, or keep the conversation going. You do not have to reply to every single "
+        "so LEAN TOWARD saying something whenever you can naturally react, tease, agree, or add "
+        "a thought of your own (without ending on a question). You do not have to reply to every single "
         "line - if you genuinely have nothing to add, or it is clearly a private aside between "
         "other people, stay quiet. Also stay quiet instead of repeating yourself if you only "
         "just spoke and nothing new has been said.\n"
