@@ -7,24 +7,37 @@ to the channel.
 
 VOICE (say "mira join" while you're in a voice channel):
   join a VC  ->  py-cord native recorder (vc.start_recording + discord.sinks.Sink)
-             ->  per-user buffer, finalized on a short silence
+             ->  per-speaker CONTINUOUS timeline (gaps filled with silence)
+             ->  SAME endpointing as the local mic (wernickes_area): in-buffer VAD,
+                 finalize after END_SILENCE of trailing silence
              ->  one Whisper instance (wernickes.transcribe), serial
              ->  InputEvent(channel="discord_voice", speaker=<member>)
              ->  same brain + action selector (addressed = her name spoken)
-             ->  reply synthesized by GPT-SoVITS (brocas) and played INTO the VC
+             ->  reply synthesized by brocas (Piper+RVC) and played INTO the VC
+
+WHY THIS MATCHES LOCAL VOICE
+  A microphone always produces samples — even silence — so the local path can end
+  a turn by watching for trailing silence *inside* the audio buffer. Discord only
+  transmits packets while you actually speak (voice-activity), so silence never
+  enters the buffer on its own. We bridge that gap with a 50 ms "ticker": every
+  tick each active speaker's buffer is advanced by either the audio that arrived
+  or an equal slice of silence. The buffer then looks just like a mic stream, and
+  we reuse the exact in-buffer VAD endpointing from wernickes_area — so a Discord
+  turn ends as snappily as a local one (END_SILENCE after you stop), instead of
+  waiting on wall-clock packet gaps.
 
 Voice receive under Discord's mandatory DAVE E2EE requires py-cord built from a
 revision that decrypts incoming frames (PR #3159), installed from git. py-cord
 and discord.py share the `discord` namespace, so only one may be installed.
 
-Everything heavy (discord, numpy, Whisper, GPT-SoVITS) is imported lazily so
-text-only use and importing the package never require the voice stack.
+Everything heavy (discord, numpy, Whisper, TTS) is imported lazily so text-only
+use and importing the package never require the voice stack.
 
 Threading: the Discord client runs its own asyncio loop in a background thread.
-on_message and the voice finalizer only ENQUEUE work; a single worker thread
-drains the queue one item at a time, so text turns, voice turns, transcription,
-thinking, and speaking are all serialized (one model call at a time — friendly
-to 6GB VRAM).
+on_message and the voice ticker only ENQUEUE finished turns; a single worker
+thread drains the queue one item at a time, so text turns, voice turns,
+transcription, thinking, and speaking are all serialized (one model call at a
+time — friendly to 6GB VRAM).
 
 Config: token from .env (DISCORD_BOT_TOKEN), env var, or ./discord_token.txt.
 Voice-OUT needs ffmpeg on PATH.
@@ -53,18 +66,21 @@ ONLY_CHANNELS = set()
 JOIN_COMMANDS = {"mira join", "mira, join", "!join", "mira come here"}
 LEAVE_COMMANDS = {"mira leave", "mira, leave", "!leave", "mira go away"}
 
-# Voice endpointing
-# Endpointing uses the SAME Silero VAD as the local mic path (wernickes_area), so
-# long sentences with natural pauses aren't chopped: VAD finds where speech actually
-# is, and an utterance ends only after VOICE_END_SILENCE of trailing silence past it.
-VOICE_END_SILENCE = 6.0     # seconds of no audio -> turn over. Set high on purpose: the
-                            # experimental #3159 receive build delivers audio in bursts with
-                            # multi-second gaps (~4s seen) even mid-sentence, so a low value
-                            # mistakes those delivery gaps for you stopping and chops your turn.
-                            # 6s rides over the gaps. Lower it if/when the build delivers steadily.
-VOICE_REFRESH_SEC = 0.7     # how often to re-run VAD + live transcription while you talk
+# ----------------------------------------------------------------------------
+# Voice endpointing — mirrors the local mic path (wernickes_area) 1:1.
+# A per-speaker buffer is advanced every VOICE_BLOCK_SEC by either arrived audio
+# or an equal slice of silence, so trailing silence accrues exactly like a mic.
+# Endpointing is then the SAME in-buffer VAD test the local path uses.
+# ----------------------------------------------------------------------------
+VOICE_BLOCK_SEC = 0.05      # ticker granularity (matches local BLOCK_SEC)
+VOICE_REFRESH_SEC = 0.7     # how often to re-run VAD + live transcription (matches local)
+VOICE_END_SILENCE = 2.0     # trailing silence that ends a turn. Local uses 3.0; 2.0 is a touch
+                            # snappier. Raise toward 3.0 if your py-cord receive build delivers
+                            # audio in late bursts (gaps mid-sentence can otherwise look like a
+                            # stop and chop the turn); lower toward 1.0 if delivery is steady.
 VOICE_MIN_SECONDS = 0.4     # ignore utterances with less speech than this (coughs, blips)
-VOICE_DEBUG = False          # print receive/finalize/transcribe diagnostics
+VOICE_MAX_SECONDS = 30.0    # force-finalize a monologue this long so the buffer can't grow forever
+VOICE_DEBUG = False         # print receive/finalize/transcribe diagnostics
 
 _STOP = object()  # sentinel to stop the worker
 
@@ -110,14 +126,14 @@ class DiscordAdapter(IOAdapter):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._net_thread: Optional[threading.Thread] = None
         self._work_thread: Optional[threading.Thread] = None
-        self._fin_thread: Optional[threading.Thread] = None
+        self._voice_thread: Optional[threading.Thread] = None
         self._inbox = queue.Queue()
         self._current_target = ("text", None)   # ("text", channel) | ("voice", None)
         self._running = False
 
         # voice
         self._voice_client = None
-        self._vbuf = {}                          # user_id -> {"member","chunks","last"}
+        self._vbuf = {}                          # uid -> per-speaker timeline state
         self._vbuf_lock = threading.Lock()
         self._voice_ready = False
         self._dbg_seen = False                   # printed "receiving audio" yet this session
@@ -159,12 +175,12 @@ class DiscordAdapter(IOAdapter):
         intents = discord.Intents.default()
         intents.message_content = True   # PRIVILEGED — also enable in the portal
         intents.voice_states = True      # to see which VC a member is in
-        # workers: brain feeder + voice finalizer (loop-independent)
+        # workers: brain feeder + voice ticker (loop-independent)
         self._running = True
         self._work_thread = threading.Thread(target=self._process, daemon=True)
         self._work_thread.start()
-        self._fin_thread = threading.Thread(target=self._voice_finalizer, daemon=True)
-        self._fin_thread.start()
+        self._voice_thread = threading.Thread(target=self._voice_worker, daemon=True)
+        self._voice_thread.start()
 
         # Create the loop up front (other threads schedule onto it via
         # run_coroutine_threadsafe), but build the Client INSIDE the runner
@@ -304,7 +320,7 @@ class DiscordAdapter(IOAdapter):
                     break
             if not getattr(vc, "recording", False):
                 vc.start_recording(self._make_sink(), self._on_recording_done)
-            self._brocas.warmup()   # heat GPT-SoVITS now, off the event loop
+            self._brocas.warmup()   # heat Piper + RVC now, off the event loop
             print(f"[Discord] joined voice: {channel}")
             return True
         except Exception as e:
@@ -313,7 +329,7 @@ class DiscordAdapter(IOAdapter):
 
     async def _on_recording_done(self, sink, *args):
         # Required by start_recording; fires when stop_recording() is called.
-        # We process utterances in real time inside the sink, so this is a no-op.
+        # We process utterances in real time in the ticker, so this is a no-op.
         return
 
     async def _disconnect_voice(self):
@@ -409,7 +425,11 @@ class DiscordAdapter(IOAdapter):
         return user  # last resort; str() will show the id object
 
     def _voice_callback(self, user, data):
-        # called from py-cord's decode thread, ~every 20ms per active speaker
+        """Called from py-cord's decode thread, ~every 20ms per active speaker.
+        We do NOT endpoint here — we just convert to 16k mono float32 and stash it
+        as 'pending'. The ticker thread folds pending audio into the continuous
+        per-speaker timeline. This keeps receive cheap and endpointing identical
+        to the local mic path."""
         if user is None or data is None:
             return
         if isinstance(data, (bytes, bytearray)):
@@ -420,123 +440,120 @@ class DiscordAdapter(IOAdapter):
                    or getattr(data, "decrypted_data", None))
         if not pcm:
             return
+        f32 = self._pcm_to_f32_16k(pcm)
+        if f32.size == 0:
+            return
         member = self._resolve_member(user)
         uid = member.id if hasattr(member, "id") else int(user)
-        now = time.time()
+
         if VOICE_DEBUG and not self._dbg_seen:
             self._dbg_seen = True
             print(f"[voice] receiving audio (first packet from "
                   f"{getattr(member, 'display_name', member)}, {len(pcm)} bytes)")
 
-        # Buffer everything; the VAD worker decides what is speech and when it ends
-        # (same approach as the local mic path). No level gating here.
         with self._vbuf_lock:
             b = self._vbuf.get(uid)
             if b is None:
-                b = {"member": member, "chunks": [], "bytes": 0,
-                     "last": now, "last_refresh": 0.0,
-                     "partial_text": "", "partial_bytes": -1}
+                b = self._new_speaker_state(member)
                 self._vbuf[uid] = b
-                gap = 0.0
-            else:
-                gap = now - b["last"]
-            b["chunks"].append(pcm)
-            b["bytes"] += len(pcm)
-            b["last"] = now
+            b["pending"].append(f32)
             b["member"] = member
-        # Reveal bursty delivery: if audio ARRIVAL pauses while you're still active,
-        # that gap (not your silence) is what the endpointer may be misreading.
-        if VOICE_DEBUG and gap > 0.5:
-            print(f"[voice] delivery gap {gap:.2f}s (no packets arrived for this long)")
 
-    def _voice_finalizer(self):
-        # Endpointing for Discord: unlike a mic, Discord stops sending packets when you
-        # go quiet (voice-activity), so silence never fills the buffer. We therefore time
-        # the silence by how long since the last packet ARRIVED (wall-clock), not by
-        # trailing silence inside the buffer. VAD is still used to (a) confirm there is
-        # real speech (reject pure noise) and (b) drive the live caption.
+    def _new_speaker_state(self, member):
+        np = self._np
+        return {
+            "member": member,
+            "buf": np.zeros(0, dtype=np.float32),  # continuous timeline (worker-owned)
+            "pending": [],                          # arrived-but-not-yet-folded (receive thread)
+            "last_refresh": 0.0,                    # monotonic, worker-owned
+            "partial_text": "",                     # worker-owned
+        }
+
+    def _voice_worker(self):
+        """The mic-equivalent for Discord. Every VOICE_BLOCK_SEC, advance each
+        active speaker's continuous timeline by either the audio that arrived or
+        an equal slice of silence, then run the SAME endpointing as the local mic:
+        VAD finds the speech span, and a turn ends after VOICE_END_SILENCE of
+        trailing silence inside the buffer."""
         SR = 16000
-        one_sec_raw = 48000 * 2 * 2          # ~1s of 48k stereo int16
+        block_len = int(SR * VOICE_BLOCK_SEC)
         while self._running:
-            time.sleep(0.15)
-            if self._vad is None:            # voice deps not loaded yet
+            time.sleep(VOICE_BLOCK_SEC)
+            if self._vad is None:                # voice deps not loaded yet
                 continue
-            now = time.time()
-            jobs = []
+            np = self._np
+
             with self._vbuf_lock:
-                for uid in list(self._vbuf.keys()):
-                    b = self._vbuf[uid]
-                    if not b["chunks"] or (now - b["last_refresh"]) < VOICE_REFRESH_SEC:
-                        continue
-                    b["last_refresh"] = now
-                    jobs.append((uid, b["member"], b"".join(b["chunks"]),
-                                 b["last"], b.get("partial_bytes", -1),
-                                 b.get("partial_text", "")))
+                uids = list(self._vbuf.keys())
 
-            for uid, member, raw, last_pkt, prev_bytes, prev_text in jobs:
-                silence_gap = time.time() - last_pkt        # seconds since last packet
-                f32 = self._pcm_to_f32_16k(raw)
-                try:
-                    speech = self._vad(f32, self._vad_opts) if len(f32) else []
-                except Exception as e:
-                    if VOICE_DEBUG:
-                        print(f"[voice] vad error: {e}")
-                    speech = []
-                spoken = ((speech[-1]["end"] - speech[0]["start"]) / SR) if speech else 0.0
-
-                # live caption: only when the buffer actually grew, there's speech,
-                # and she isn't mid-reply (so Whisper doesn't fight GPT-SoVITS).
-                text = prev_text
-                if speech and len(raw) != prev_bytes and not self._brain_busy.is_set():
-                    t = self._transcribe_f32(f32)
-                    with self._vbuf_lock:
-                        b = self._vbuf.get(uid)
-                        if b is not None:
-                            b["partial_bytes"] = len(raw)
-                    if t and t != prev_text:
-                        text = t
-                        speaker = getattr(member, "display_name", None) or str(member)
-                        self._emit(InputEvent(text=text, speaker=speaker, kind=PARTIAL,
-                                              channel="discord_voice", raw=None))
-                        with self._vbuf_lock:
-                            b = self._vbuf.get(uid)
-                            if b is not None:
-                                b["partial_text"] = text
-                    elif t:
-                        text = t
-
-                # endpoint: no packets for VOICE_END_SILENCE -> you've stopped talking.
-                # Re-read the freshest packet time at the decision moment so a slow
-                # transcribe pass (or you resuming right at the boundary) is never
-                # miscounted as your silence.
+            for uid in uids:
+                # 1) fold this tick's audio (or silence) into the timeline
                 with self._vbuf_lock:
                     b = self._vbuf.get(uid)
-                    fresh_gap = (time.time() - b["last"]) if b else silence_gap
-                if fresh_gap >= VOICE_END_SILENCE:
-                    with self._vbuf_lock:
-                        b = self._vbuf.pop(uid, None)
                     if b is None:
                         continue
-                    final_raw = b"".join(b["chunks"])
-                    final_text = b.get("partial_text", "") or text
-                    if spoken >= VOICE_MIN_SECONDS:
-                        if not final_text:
-                            final_text = self._transcribe_f32(self._pcm_to_f32_16k(final_raw))
-                        if final_text:
-                            if VOICE_DEBUG:
-                                print(f"[voice] finalized {getattr(member, 'display_name', member)} "
-                                      f"(silence {fresh_gap:.1f}s, spoke {spoken:.1f}s) -> {final_text!r}")
-                            self._inbox.put(("voice", member, final_raw, final_text))
-                            continue
-                    if VOICE_DEBUG:
-                        print(f"[voice] dropped (silence {fresh_gap:.1f}s, spoke {spoken:.1f}s, "
-                              f"text={final_text!r})")
-                elif not speech and len(raw) > one_sec_raw:
-                    # packets still coming but no speech (noise / always-transmit): trim
-                    with self._vbuf_lock:
-                        b = self._vbuf.get(uid)
-                        if b is not None:
-                            self._trim_buffer(b, one_sec_raw)
+                    pending = b["pending"]
+                    b["pending"] = []
+                if pending:
+                    chunk = np.concatenate(pending)
+                else:
+                    chunk = np.zeros(block_len, dtype=np.float32)   # silence, like a quiet mic
+                b["buf"] = np.concatenate([b["buf"], chunk])
+
+                # 2) endpoint on a refresh cadence (identical to local _worker)
+                now = time.monotonic()
+                if now - b["last_refresh"] < VOICE_REFRESH_SEC:
+                    continue
+                b["last_refresh"] = now
+                self._endpoint_speaker(uid, b, SR)
+
+    def _endpoint_speaker(self, uid, b, SR):
+        """Mirror of wernickes_area._worker's per-refresh logic, per speaker."""
+        buf = b["buf"]
+        try:
+            speech = self._vad(buf, self._vad_opts) if len(buf) else []
+        except Exception as e:
+            if VOICE_DEBUG:
+                print(f"[voice] vad error: {e}")
+            speech = []
+
+        if not speech:
+            # no speech yet -> keep only the last second so the buffer doesn't grow
+            if len(buf) > SR:
+                b["buf"] = buf[-SR:]
+            return
+
+        silence = (len(buf) - speech[-1]["end"]) / SR
+        spoken = (speech[-1]["end"] - speech[0]["start"]) / SR
+
+        # live caption: re-transcribe as you talk, but never while she's mid-reply
+        # (so Whisper doesn't fight the TTS for the GPU).
+        member = b["member"]
+        if not self._brain_busy.is_set():
+            text = self._transcribe_f32(buf)
+            if text and text != b["partial_text"]:
+                b["partial_text"] = text
+                speaker = getattr(member, "display_name", None) or str(member)
+                self._emit(InputEvent(text=text, speaker=speaker, kind=PARTIAL,
+                                      channel="discord_voice", raw=None))
+
+        end_now = silence >= VOICE_END_SILENCE or spoken >= VOICE_MAX_SECONDS
+        if not end_now:
+            return
+
+        # turn over -> finalize and hand to the brain worker
+        with self._vbuf_lock:
+            self._vbuf.pop(uid, None)
+        if spoken < VOICE_MIN_SECONDS:
+            if VOICE_DEBUG:
+                print(f"[voice] dropped (spoke {spoken:.1f}s < {VOICE_MIN_SECONDS}s)")
+            return
+        final_text = b["partial_text"]
+        final_audio = buf
+        if VOICE_DEBUG:
+            print(f"[voice] finalized {getattr(member, 'display_name', member)} "
+                  f"(silence {silence:.1f}s, spoke {spoken:.1f}s) -> {final_text!r}")
+        self._inbox.put(("voice", member, final_text, final_audio))
 
     def _pcm_to_f32_16k(self, pcm):
         np = self._np
@@ -551,31 +568,12 @@ class DiscordAdapter(IOAdapter):
             return np.zeros(0, dtype=np.float32)
         return a[:n].reshape(-1, 3).mean(axis=1).astype(np.float32)
 
-    def _transcribe_pcm(self, pcm):
-        try:
-            return self._wernicke.transcribe(self._pcm_to_f32_16k(pcm))
-        except Exception as e:
-            print(f"[Discord] transcription error: {e}")
-            return ""
-
     def _transcribe_f32(self, f32):
         try:
             return self._wernicke.transcribe(f32)
         except Exception as e:
             print(f"[Discord] transcription error: {e}")
             return ""
-
-    @staticmethod
-    def _trim_buffer(b, max_bytes):
-        """Keep only the most recent ~max_bytes of raw audio (drop older silence)."""
-        kept, acc = [], 0
-        for ch in reversed(b["chunks"]):
-            kept.append(ch)
-            acc += len(ch)
-            if acc >= max_bytes:
-                break
-        b["chunks"] = list(reversed(kept))
-        b["bytes"] = acc
 
     # ---------------- worker: queue -> brain ----------------
     def _emit(self, ev):
@@ -598,8 +596,8 @@ class DiscordAdapter(IOAdapter):
                                           mentioned=mentioned, reply_to_her=reply_to_her,
                                           is_dm=is_dm))
                 elif kind == "voice":
-                    _, member, pcm, pretranscribed = item
-                    text = pretranscribed or self._transcribe_pcm(pcm)
+                    _, member, pretranscribed, audio_f32 = item
+                    text = pretranscribed or self._transcribe_f32(audio_f32)
                     if not text:
                         continue
                     speaker = getattr(member, "display_name", None) or str(member)

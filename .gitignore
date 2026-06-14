@@ -28,6 +28,7 @@ models/
 *.gguf
 *.ckpt
 *.bin
+.claude/
 
 # Audio / TTS output
 audio_output/
@@ -60,4 +61,14 @@ memory_store/
 Thumbs.db
 
 # Jupyter (if you experiment in notebooks)
-.ipynb_checkpoints/test_out.wav
+.ipynb_checkpoints/
+test_out.wav
+test_piper.wav
+test_rvc.wav
+
+# Piper voice models (large ONNX files)
+piper_voices/
+
+# RVC model files / archives (placed by user, not in repo) — ignore the whole dir
+rvc_models/
+*.zip

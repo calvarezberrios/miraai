@@ -4,15 +4,32 @@
 # NOTE: these are the PIP deps only. Install separately (see README):
 #   - ffmpeg  -> system binary on PATH (Discord voice playback needs it; NOT a pip package)
 #   - Ollama  -> the local LLM runtime (then: ollama pull qwen2.5:3b ; ollama pull nomic-embed-text)
-#   - GPT-SoVITS -> the voice engine, its own bundled Python, run as the api_v2 server
+#   - GPT-SoVITS -> bundled runtime at D:\GPT-SoVITS-v3lora-20250228\ — used as the subprocess
+#                   Python for RVC inference (Python 3.9 + fairseq + faiss + torch+cuda).
+#                   RVC inference uses the `rvc_python` library installed INTO that runtime:
+#                     <runtime>\python.exe -m pip install rvc-python torchcrepe torchfcpe --no-deps
+#                   (--no-deps so it doesn't disturb the existing torch/faiss/fairseq there).
+#                   No GPT-SoVITS server needed; just keep the install present.
+#
+# TTS model files (not in git, download once):
+#   - piper voice: already at piper_voices\en\en_US\hfc_female\medium\  (downloaded via HF hub)
+#   - RVC model:   mira.pth + mira.index in rvc_models\ (current: Yui from HF SmlCoke/rvc-yui)
+#   - HuBERT/RMVPE base models: rvc_python auto-downloads these to its own base_models\ on first run
+#
+# torch / torchaudio: NOT in pip for Python 3.14; installed via user site-packages
+#   (the .pth shim at .venv\Lib\site-packages\userpkgs.pth adds them automatically)
 
 # --- core ---
 openai                 # LLM + embeddings via Ollama's OpenAI-compatible API
 chromadb               # local vector store for long-term memory
-requests               # calls to the GPT-SoVITS API server
 sounddevice            # microphone capture + speaker playback (local mode)
 soundfile              # WAV decode / encode
-numpy                  # audio buffers / math  (if you hit numpy 2.x errors, pin numpy<2)
+numpy                  # audio buffers / math
+
+# --- TTS (Piper + optional RVC) ---
+piper-tts              # neural TTS (female voice); runs inline in the main process.
+                       # RVC voice-conversion (optional) runs in the GPT-SoVITS runtime via
+                       # rvc_python — see the GPT-SoVITS note above; nothing to add here.
 
 # --- speech-to-text ---
 faster-whisper         # Whisper STT (CTranslate2 backend)

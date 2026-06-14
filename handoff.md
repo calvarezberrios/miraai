@@ -21,8 +21,11 @@ region maps to a software module. Working through a phased build plan.
   Whisper and GPT-SoVITS. Set in ONE place: the `MODEL` constant in `prefrontal_cortex.py`.
   Bigger (`qwen2.5:7b` / `llama3.1:8b`) grounds even better but crowds the GPU.
 - **Embedding model:** `nomic-embed-text` (local, for long-term memory).
-- **TTS engine:** **GPT-SoVITS** (local voice cloning) — young-adult-female anime timbre,
-  cloned zero-shot from a short reference clip.
+- **TTS engine:** **Piper** (replaced GPT-SoVITS), with optional **RVC** voice conversion.
+  Piper generates fast English-female speech. RVC (timbre conversion to a trained `.pth`/`.index`
+  voice) is wired up but **currently DISABLED** (`USE_RVC = False` in `brocas_area.py`) because the
+  available RVC model output wasn't clean enough. Flip `USE_RVC = True` to re-enable once a
+  better-sounding model is available. With RVC off, no subprocess is launched.
 - **STT engine:** **Whisper** via **faster-whisper** (accent-robust).
 - **OS:** Windows (PowerShell). Ollama at `D:\Ollama\`, project at `D:\aiproject\`.
 - **GPU: NVIDIA GTX 1660 Super, 6GB VRAM, FULL-PRECISION ONLY.** Turing TU116 has a broken
@@ -30,7 +33,7 @@ region maps to a software module. Working through a phased build plan.
   GPT-SoVITS must run fp32 (`is_half: false`). VRAM is the day-to-day squeeze. A future GPU
   with working fp16 + 12GB+ is the only real speedup.
 - Ollama server must be running before the app works.
-- The GPT-SoVITS API server must ALSO be running before voice works.
+- No separate TTS server needed — Piper runs inline, RVC via subprocess.
 
 ## NEW: Mira now runs in two modes
 - `python main.py`            → **local** mode (mic + speakers; unchanged, rock-solid).
@@ -67,17 +70,57 @@ steady DAVE receive (or it merges to stable), unpin and lower `VOICE_END_SILENCE
 
 ---
 
-## GPT-SoVITS setup (read before touching voice)
-- Windows integrated package at `D:\GPT-SoVITS\`. Start in API mode (not WebUI):
-  ```powershell
-  cd D:\GPT-SoVITS
-  .\runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880
-  ```
-- **CRITICAL — half precision:** in `GPT_SoVITS\configs\tts_infer.yaml` set `is_half: false`
-  (keep `device: cuda`), restart. With `is_half: true` on this GPU synthesis returns a
-  full-size but ZERO-amplitude (silent) wav.
-- **Reference voice:** clip at `brain\forebrain\cerebrum\frontal_lobe\voice\reference.wav`;
-  transcript in the `VOICE` dict in `brocas_area.py`. Must be 3–10s, clean, single speaker.
+## TTS setup — Piper + RVC (replaced GPT-SoVITS)
+No server to start. Piper is a pip package; RVC runs as a subprocess.
+
+### File layout
+```
+D:\aiproject\
+├── piper_voices\en\en_US\hfc_female\medium\
+│   ├── en_US-hfc_female-medium.onnx        ← already downloaded
+│   └── en_US-hfc_female-medium.onnx.json
+├── rvc_models\
+│   ├── hubert_base.pt                       ← already downloaded (from lj1995/VoiceConversionWebUI)
+│   ├── mira.pth                             ← DROP YOUR RVC MODEL HERE
+│   └── mira.index                           ← DROP YOUR RVC INDEX HERE (optional)
+└── rvc\
+    └── rvc_infer.py                         ← standalone inference script
+```
+
+### Enabling / placing an RVC model
+`USE_RVC` at the top of `brocas_area.py` toggles it (currently ON). Drop a **v2** `.pth` as
+`D:\aiproject\rvc_models\mira.pth` and its `.index` as `mira.index`. Current voice = **Yui
+(K-On!)**, a v2 40k model from HF `SmlCoke/rvc-yui`. Tunables at top of `brocas_area.py`:
+`PITCH_SHIFT`, `INDEX_RATE` (0.5 default; ↑ for more character, ↓ if it warbles).
+
+### How RVC runs — uses the proven `rvc_python` library (NOT a hand-rolled model)
+An earlier version reimplemented the RVC network from scratch; it produced intelligible but
+noisy/garbled audio. **Replaced with the `rvc_python` package + RMVPE F0** — far crisper.
+`rvc_python` (and `torchcrepe`, `torchfcpe`) are installed into the **GPT-SoVITS bundled Python**
+(`D:\GPT-SoVITS-v3lora-20250228\runtime\python.exe`, Python 3.9 with torch+cuda+faiss) — the main
+venv (Python 3.14) can't install them. Installed there with `pip install <pkg> --no-deps` so the
+existing torch/faiss/fairseq weren't disturbed.
+
+`brocas_area.py` launches `rvc_infer.py --serve` ONCE as a **persistent subprocess**. It loads the
+HuBERT + RMVPE + RVC model once (rvc_python auto-downloads HuBERT/RMVPE base models to its own
+`base_models/`), prints `READY`, then takes `input|output|pitch` requests on stdin. Hot conversions
+are **~0.7s**; cold load is ~10s, so `warmup()` pre-starts it. rvc_python auto-detects the GTX 1660
+and forces fp32 (matches this GPU's broken-fp16 constraint).
+
+### F0 method (crispness knob)
+`rvc_infer.py` defaults `--f0method rmvpe` — the modern, cleanest pitch estimator. harvest (the old
+hand-rolled default) sounds warbly by comparison. Other options: `pm` (fast/rough), `crepe`.
+
+### Fallback behavior
+- If `USE_RVC=False` or `mira.pth` is missing → uses raw Piper output (clean female voice).
+- If RVC subprocess fails → same Piper fallback, no crash.
+- Pitch shift: `PITCH_SHIFT` constant in `brocas_area.py` (0 = no shift, positive = higher).
+
+### Running
+1. Start **Ollama**.
+2. From `D:\aiproject\` (venv active):
+   - Local: `python main.py`
+   - Discord: `python main.py --discord`
 
 ---
 
@@ -159,12 +202,21 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 - **Text:** `on_message` → gating in the brain. Token via `.env` `DISCORD_BOT_TOKEN`
   (gitignored). Message Content Intent ON.
 - **Voice:** `mira join` / `mira leave` commands. Receive via `vc.start_recording` + a custom
-  `discord.sinks.Sink` whose `write()` buffers PCM per speaker. STT via wernickes `transcribe`,
-  TTS out via `vc.play(FFmpegPCMAudio(...))`. `_brain_busy` flag pauses live partials while she
-  speaks so Whisper never fights GPT-SoVITS for the GPU.
-- **Endpointing = wall-clock packet gap, NOT in-buffer silence.** Discord (voice-activity mode)
-  stops sending packets when you're quiet, so silence never enters the buffer — we time the
-  gap since the last packet arrived. `VOICE_END_SILENCE` currently **6.0s** (see limitation).
+  `discord.sinks.Sink` whose `write()` hands decoded PCM to the adapter. STT via wernickes
+  `transcribe`, TTS out via `vc.play(FFmpegPCMAudio(...))`. `_brain_busy` flag pauses live
+  partials while she speaks so Whisper never fights the TTS for the GPU.
+- **Endpointing now MIRRORS the local mic (rewritten for responsiveness).** Discord only sends
+  packets while you actually speak, so silence never arrives on its own. A 50 ms ticker thread
+  (`_voice_worker`) advances each speaker's buffer by either the audio that arrived or an equal
+  slice of **silence**, making the stream look just like a mic. Then it runs the SAME in-buffer
+  VAD endpointing as `wernickes_area._worker`: a turn ends after `VOICE_END_SILENCE` of trailing
+  silence (default **2.0s**; local uses 3.0). This replaced the old wall-clock packet-gap timer,
+  which dragged because the receive build delivers audio in late bursts. Constants
+  (`VOICE_BLOCK_SEC`/`VOICE_REFRESH_SEC`/`VOICE_END_SILENCE`/`VOICE_MIN_SECONDS`/`VOICE_MAX_SECONDS`)
+  sit at the top of `discord_adapter.py` and line up with the local mic's values.
+  - **If turns get chopped mid-sentence**, the build is delivering in bursts with gaps > the
+    threshold → raise `VOICE_END_SILENCE` toward 3.0. If delivery is steady, lower toward 1.0 for
+    even snappier replies.
 - **Speaker name resolution** (`_resolve_member`): py-cord may hand the sink a bare
   `discord.Object` (id only). Resolves id → VC channel members → guild cache → user cache.
   If a speaker still shows as `<Object id=…>`, enable the **Server Members Intent** (portal +
@@ -174,11 +226,11 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 
 ## Running the app
 1. Start **Ollama**.
-2. Start **GPT-SoVITS** API: `cd D:\GPT-SoVITS; .\runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880`.
-3. From `D:\aiproject\` (venv active):
+2. From `D:\aiproject\` (venv active):
    - Local: `python main.py` — just talk; pause and she replies. Use headphones.
    - Discord: `python main.py --discord` — then `mira join` in a server text channel while
      you're in a voice channel.
+3. No GPT-SoVITS server needed anymore.
 
 ---
 
@@ -196,12 +248,16 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 - ⬜ **Idle / default-mode behaviors** (ramble/comment when quiet) — DEFERRED. Best built with
   the avatar (it's stream dead-air filler).
 
-### Discord voice — known limitations (experimental-build bound)
-- The pinned #3159 receive build delivers audio **late, in bursts with multi-second gaps**
-  (~4s seen), and occasionally **stale/duplicated** audio. `VOICE_END_SILENCE = 6.0` rides over
-  the delivery gaps so one turn isn't chopped into many — at the cost of ~6s latency after you
-  finish. No adapter logic fully fixes the stale-audio flakiness; it's upstream. **Local voice
-  is the smooth path** for real conversation. Revisit when py-cord's DAVE receive matures.
+### Discord voice — responsiveness (rewritten to match local)
+- The voice path now uses the **silence-filled continuous timeline + in-buffer VAD** model
+  (see discord_adapter.py above), so endpointing is as snappy as the local mic — a turn ends
+  ~`VOICE_END_SILENCE` (2.0s) after you stop, instead of the old wall-clock packet-gap timer
+  that dragged to ~6s. This is the main responsiveness fix.
+- **Residual upstream caveat:** the pinned #3159 receive build can still deliver audio in late
+  bursts with multi-second gaps, and occasionally stale/duplicated audio. A gap *mid-sentence*
+  larger than `VOICE_END_SILENCE` can still chop a turn (the silence-fill reads it as a stop).
+  If that happens, raise `VOICE_END_SILENCE` toward 3.0. The stale-audio flakiness is upstream
+  and unchanged. Revisit when py-cord's DAVE receive matures.
 - Barge-in (her yielding when you talk over her) was built then **removed** — an open/hot mic
   triggered it on background noise. Re-add later via push-to-talk or a "Mira stop" keyword if wanted.
 

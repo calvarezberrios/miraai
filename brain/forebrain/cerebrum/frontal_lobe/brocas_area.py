@@ -1,93 +1,81 @@
 """
-brocas_area.py - speech production (TTS) for Mira.
+brocas_area.py — speech production (TTS) for Mira.
 
-Anatomy: Broca's area (frontal lobe) = assembling words into produced speech.
-Implementation: sends text to a locally-running GPT-SoVITS api_v2 server,
-plays the returned audio, and serializes playback through queues so replies
-never overlap (motor sequencing).
+Pipeline: text → Piper TTS (fast neural TTS) → WAV → RVC voice conversion → playback.
 
-Latency design: a reply is split into sentences and pushed through a TWO-STAGE
-pipeline -- a synth worker turns sentences into audio, a playback worker plays
-them in order. Sentence N plays while sentence N+1 is still synthesizing, so
-Mira starts talking after the FIRST sentence is ready, not the whole reply.
+Piper produces clean English-female speech quickly; RVC then converts the timbre
+to Mira's trained voice using the .pth / .index model files.
 
-Start the engine first, in the GPT-SoVITS folder (its OWN bundled runtime):
-    .\runtime\python.exe api_v2.py -a 127.0.0.1 -p 9880
+RVC inference runs as a subprocess under the GPT-SoVITS bundled runtime Python,
+which has fairseq + faiss + torch+cuda (unlike the main venv on Python 3.14).
+
+Same two-stage synth/playback pipeline as before: sentence N plays while
+sentence N+1 is still being synthesized.
 """
 
+import atexit
 import io
+import os
 import queue
 import re
+import subprocess
+import tempfile
 import threading
 from typing import Optional
 
-import requests
 import sounddevice as sd
 import soundfile as sf
 
-# --- Voice config ---------------------------------------------------------
-API_URL = "http://127.0.0.1:9880/tts"
+# ---------------------------------------------------------------------------
+# Config — edit these paths to match your setup
+# ---------------------------------------------------------------------------
 
-# Mira's cloned voice. Point ref_audio_path at the same 3-10s clip you
-# tested with in the WebUI, and paste its exact transcript below.
-VOICE = {
-    "ref_audio_path": r"D:\aiproject\brain\forebrain\cerebrum\frontal_lobe\voice\sample_clip.mp3",
-    "prompt_text": "You want to know all about me, huh? Well, let's just say I'm a bit of a handful.",
-    "prompt_lang": "en",   # language spoken in the reference clip
-    "text_lang": "en",     # language Mira speaks
-}
+# Piper voice model (English female, converted to Mira's voice by RVC)
+PIPER_MODEL = r"D:\aiproject\piper_voices\en\en_US\hfc_female\medium\en_US-hfc_female-medium.onnx"
 
-# Generation tunables (sane defaults; lower temperature = steadier output)
-PARAMS = {
-    "text_split_method": "cut5",   # split on punctuation; good for sentences
-    "batch_size": 1,
-    "media_type": "wav",
-    "streaming_mode": False,
-    "top_k": 15,
-    "top_p": 1.0,
-    "temperature": 1.0,
-    "parallel_infer": False,
-    "split_bucket": False,
-    "speed_factor": 1.12,
-}
+# Master switch: when False, Mira speaks with the raw Piper female voice and RVC
+# is skipped entirely (no subprocess launched). Flip to True to re-enable the
+# RVC voice conversion once you have a model whose output sounds clean.
+USE_RVC = True
 
-# --- Pipeline queues (motor sequencing) -----------------------------------
-# _synth_q items: (text, should_play). _play_q items: audio bytes.
-_synth_q = queue.Queue()
-_play_q = queue.Queue()
+# RVC model files — drop your .pth and .index here
+RVC_MODEL  = r"D:\aiproject\rvc_models\mira.pth"
+RVC_INDEX  = r"D:\aiproject\rvc_models\mira.index"   # set "" to skip
 
-_SENTENCE_RE = re.compile(r".*?[.!?](?:\s|$)|.+$", re.S)
+# Python runtime that has fairseq + faiss + torch (GPT-SoVITS bundled runtime)
+RVC_PYTHON = r"D:\GPT-SoVITS-v3lora-20250228\runtime\python.exe"
 
-# --- Speech cleaning ------------------------------------------------------
-# Stage directions like *giggles* aren't spoken by TTS verbatim -- they'd be
-# read out as the literal word. We convert laugh-type actions into vocal
-# sounds and strip everything else that can't be voiced.
+# Path to our RVC inference script
+RVC_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
+                           "..", "rvc", "rvc_infer.py")
+RVC_SCRIPT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             r"..\..\..\..\rvc\rvc_infer.py"))
 
-# Map the ACTION WORD (lowercased, no asterisks) to what Mira should vocalize.
-# Match is substring-based, so "giggles softly" still hits "giggle".
+# Pitch shift in semitones (0 = no change; positive = higher)
+PITCH_SHIFT = 0
+
+# How much of the .index retrieval to blend in (0.0–1.0); 0 = pure model, no index.
+# 0.5 is a clean default — high values (0.8–1.0) add timbre accuracy but can warble.
+INDEX_RATE = 0.5
+
+# ---------------------------------------------------------------------------
+# Speech text cleaning (same as before)
+# ---------------------------------------------------------------------------
+
 SPOKEN_ACTIONS = {
-    "giggle": "hehe",
-    "giggles": "hehe",
-    "laugh": "haha",
-    "laughs": "haha",
-    "chuckle": "heh",
-    "chuckles": "heh",
-    "giggling": "hehe",
-    "laughing": "haha",
-    "hums": "hmm",
-    "hum": "hmm",
-    "sighs": "haah",
-    "sigh": "haah",
-    "gasps": "gah",
-    "gasp": "gah",
+    "giggle": "hehe", "giggles": "hehe",
+    "laugh": "haha",  "laughs": "haha",
+    "chuckle": "heh", "chuckles": "heh",
+    "giggling": "hehe", "laughing": "haha",
+    "hums": "hmm", "hum": "hmm",
+    "sighs": "haah", "sigh": "haah",
+    "gasps": "gah",  "gasp": "gah",
     "snickers": "heh",
 }
 
-# matches *...* and (...) and [...] stage-direction spans
 _ACTION_SPAN_RE = re.compile(r"\*([^*]+)\*|\(([^)]*)\)|\[([^\]]*)\]")
-# strips emoji / pictographs and most symbol blocks
 _EMOJI_RE = re.compile(
-    "[" 
+    "["
     "\U0001F300-\U0001FAFF"
     "\U00002600-\U000027BF"
     "\U0001F000-\U0001F0FF"
@@ -96,6 +84,7 @@ _EMOJI_RE = re.compile(
     "]+",
     flags=re.UNICODE,
 )
+_SENTENCE_RE = re.compile(r".*?[.!?](?:\s|$)|.+$", re.S)
 
 
 def _replace_action(match):
@@ -103,58 +92,198 @@ def _replace_action(match):
     for word, sound in SPOKEN_ACTIONS.items():
         if word in inner:
             return sound
-    return ""  # unspeakable stage direction -> drop entirely
+    return ""
 
 
 def _clean_for_speech(text):
-    # type: (str) -> str
-    """Make text safe to vocalize: convert laugh-type actions to sounds,
-    strip other stage directions, emoji, and leftover markdown."""
     text = _ACTION_SPAN_RE.sub(_replace_action, text)
     text = _EMOJI_RE.sub("", text)
-    # hyphen INSIDE a word -> join the parts ("well-known" -> "wellknown")
     text = re.sub(r"(?<=\w)-(?=\w)", "", text)
-    # any remaining dash (spaced hyphen, en/em dash) -> pause, not "minus"
-    text = re.sub(r"\s*[\u2012\u2013\u2014\u2015-]\s*", ", ", text)
+    text = re.sub(r"\s*[‒–—―-]\s*", ", ", text)
     text = text.replace("*", "").replace("_", "").replace("`", "")
-    text = re.sub(r"\s{2,}", " ", text)        # collapse doubled spaces
-    text = re.sub(r"\s+([,.!?])", r"\1", text)  # tidy space-before-punct
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\s+([,.!?])", r"\1", text)
     return text.strip()
 
 
 def _split_sentences(text):
-    # type: (str) -> list
-    """Break a reply into sentence-ish chunks so the first can play ASAP."""
     parts = [m.group().strip() for m in _SENTENCE_RE.finditer(text)]
     return [p for p in parts if p]
 
 
+# ---------------------------------------------------------------------------
+# Piper synthesis
+# ---------------------------------------------------------------------------
+
+def _piper_synthesize(text, out_path):
+    # type: (str, str) -> bool
+    """Run Piper TTS and write WAV to out_path. Returns True on success."""
+    import wave
+    try:
+        _ensure_piper_loaded()
+        with wave.open(out_path, "wb") as wav_file:
+            _piper_voice.synthesize_wav(text, wav_file)
+        return True
+    except Exception as e:
+        print("[brocas_area] piper error:", e)
+        return False
+
+
+_piper_voice = None
+_piper_lock = threading.Lock()
+
+
+def _ensure_piper_loaded():
+    global _piper_voice
+    if _piper_voice is not None:
+        return
+    with _piper_lock:
+        if _piper_voice is not None:
+            return
+        from piper.voice import PiperVoice
+        _piper_voice = PiperVoice.load(PIPER_MODEL)
+        print("[brocas_area] Piper voice loaded:", PIPER_MODEL)
+
+
+# ---------------------------------------------------------------------------
+# RVC voice conversion
+# ---------------------------------------------------------------------------
+
+# A single long-lived RVC subprocess keeps HuBERT + the model + faiss hot, so
+# each conversion is just inference (~0.5-1s) instead of a ~10s cold reload.
+_rvc_proc = None
+_rvc_lock = threading.Lock()
+
+
+def _start_rvc_server():
+    # type: () -> Optional[subprocess.Popen]
+    """Launch the persistent RVC server and wait until its models are loaded."""
+    if not os.path.isfile(RVC_MODEL):
+        return None
+    cmd = [
+        RVC_PYTHON, RVC_SCRIPT,
+        "--serve",
+        "--model",      RVC_MODEL,
+        "--index_rate", str(INDEX_RATE),
+    ]
+    if RVC_INDEX and os.path.isfile(RVC_INDEX):
+        cmd += ["--index", RVC_INDEX]
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=None, text=True, bufsize=1,
+        )
+    except Exception as e:
+        print("[brocas_area] failed to launch RVC server:", e)
+        return None
+    # block until the server prints READY (models hot)
+    for line in proc.stdout:
+        if line.strip() == "READY":
+            print("[brocas_area] RVC server ready")
+            return proc
+        if proc.poll() is not None:
+            break
+    print("[brocas_area] RVC server exited before becoming ready")
+    return None
+
+
+def _ensure_rvc_server():
+    # type: () -> Optional[subprocess.Popen]
+    global _rvc_proc
+    if _rvc_proc is not None and _rvc_proc.poll() is None:
+        return _rvc_proc
+    with _rvc_lock:
+        if _rvc_proc is not None and _rvc_proc.poll() is None:
+            return _rvc_proc
+        _rvc_proc = _start_rvc_server()
+        return _rvc_proc
+
+
+@atexit.register
+def _shutdown_rvc_server():
+    if _rvc_proc is not None and _rvc_proc.poll() is None:
+        try:
+            _rvc_proc.stdin.write("QUIT\n")
+            _rvc_proc.stdin.flush()
+            _rvc_proc.wait(timeout=3)
+        except Exception:
+            _rvc_proc.kill()
+
+
+def _rvc_convert(input_wav, output_wav):
+    # type: (str, str) -> bool
+    """Send one conversion request to the persistent RVC server. Serialized."""
+    proc = _ensure_rvc_server()
+    if proc is None:
+        return False
+    with _rvc_lock:
+        try:
+            proc.stdin.write("%s|%s|%d\n" % (input_wav, output_wav, PITCH_SHIFT))
+            proc.stdin.flush()
+            reply = proc.stdout.readline().strip()
+            if reply == "OK":
+                return True
+            print("[brocas_area] rvc:", reply)
+            return False
+        except Exception as e:
+            print("[brocas_area] rvc server error:", e)
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline: text → Piper → RVC → bytes
+# ---------------------------------------------------------------------------
+
 def _synthesize(text):
     # type: (str) -> Optional[bytes]
-    payload = {
-        "text": text,
-        "text_lang": VOICE["text_lang"],
-        "ref_audio_path": VOICE["ref_audio_path"],
-        "prompt_text": VOICE["prompt_text"],
-        "prompt_lang": VOICE["prompt_lang"],
-    }
-    payload.update(PARAMS)
-    try:
-        r = requests.post(API_URL, json=payload, timeout=60)
-    except requests.RequestException as e:
-        print("[brocas_area] request failed:", e)
-        return None
-    if r.status_code != 200 or not r.headers.get("Content-Type", "").startswith("audio"):
-        print("[brocas_area] synth failed (%s): %s" % (r.status_code, r.text[:200]))
-        return None
-    return r.content
+    """Return synthesized (and optionally RVC-converted) audio as WAV bytes."""
+    with tempfile.NamedTemporaryFile(suffix="_piper.wav", delete=False) as tf_in:
+        piper_path = tf_in.name
+    with tempfile.NamedTemporaryFile(suffix="_rvc.wav", delete=False) as tf_out:
+        rvc_path = tf_out.name
 
+    try:
+        if not _piper_synthesize(text, piper_path):
+            return None
+
+        # RVC disabled, or model missing → use the Piper female voice directly.
+        if not USE_RVC or not os.path.isfile(RVC_MODEL):
+            with open(piper_path, "rb") as f:
+                return f.read()
+
+        if not _rvc_convert(piper_path, rvc_path):
+            # Fallback: use Piper audio without RVC
+            print("[brocas_area] RVC failed, falling back to Piper audio")
+            with open(piper_path, "rb") as f:
+                return f.read()
+
+        with open(rvc_path, "rb") as f:
+            return f.read()
+    finally:
+        for p in (piper_path, rvc_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Playback
+# ---------------------------------------------------------------------------
 
 def _play(wav_bytes):
     # type: (bytes) -> None
     data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
     sd.play(data, sr)
-    sd.wait()  # block until this clip finishes, so the next one plays after it
+    sd.wait()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline queues (motor sequencing — same design as before)
+# ---------------------------------------------------------------------------
+
+_synth_q = queue.Queue()
+_play_q  = queue.Queue()
 
 
 def _synth_worker():
@@ -163,7 +292,7 @@ def _synth_worker():
         try:
             audio = _synthesize(text)
             if audio and should_play:
-                _play_q.put(audio)      # hand off to playback stage
+                _play_q.put(audio)
         except Exception as e:
             print("[brocas_area] synth error:", e)
         finally:
@@ -182,14 +311,16 @@ def _play_worker():
 
 
 threading.Thread(target=_synth_worker, daemon=True).start()
-threading.Thread(target=_play_worker, daemon=True).start()
+threading.Thread(target=_play_worker,  daemon=True).start()
 
 
-# --- Public API -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Public API (unchanged interface)
+# ---------------------------------------------------------------------------
+
 def say(text):
     # type: (str) -> None
-    """Queue text for Mira to speak. Returns immediately; playback is serialized.
-    The reply is split into sentences so the first one starts as soon as it's ready."""
+    """Queue text for Mira to speak. Returns immediately; playback is serialized."""
     if not (text and text.strip()):
         return
     text = _clean_for_speech(text)
@@ -200,17 +331,18 @@ def say(text):
 
 
 def warmup():
-    """Fire a throwaway synthesis so CUDA kernels/model are hot before the
-    first real reply. Synthesizes but does not play. Returns immediately."""
-    _synth_q.put(("Warming up.", False))
+    """Pre-load Piper voice (and the RVC server if enabled) so reply 1 is fast."""
+    threading.Thread(target=_ensure_piper_loaded, daemon=True).start()
+    if USE_RVC:
+        threading.Thread(target=_ensure_rvc_server, daemon=True).start()
 
 
 def wait_until_done():
-    """Block until everything currently queued has finished speaking."""
-    _synth_q.join()   # all sentences synthesized + handed to playback
-    _play_q.join()    # all audio finished playing
+    """Block until all queued speech has finished playing."""
+    _synth_q.join()
+    _play_q.join()
 
 
 if __name__ == "__main__":
-    say("Hey there. If you can hear this, my voice is finally working.")
+    say("Hey there. If you can hear this, Piper and RVC are working correctly.")
     wait_until_done()
