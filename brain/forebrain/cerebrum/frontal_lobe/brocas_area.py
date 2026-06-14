@@ -31,8 +31,8 @@ API_URL = "http://127.0.0.1:9880/tts"
 # Mira's cloned voice. Point ref_audio_path at the same 3-10s clip you
 # tested with in the WebUI, and paste its exact transcript below.
 VOICE = {
-    "ref_audio_path": r"D:\aiproject\brain\forebrain\cerebrum\frontal_lobe\voice\sample_clip.mp3",
-    "prompt_text": "You want to know all about me, huh? Well, let's just say I'm a bit of a handful.",
+    "ref_audio_path": r"C:\Users\manni\Documents\aiproject\brain\forebrain\cerebrum\frontal_lobe\voice\grias_sample.mp3",
+    "prompt_text": "this is a sample clip for training. please keep and without silences",
     "prompt_lang": "en",   # language spoken in the reference clip
     "text_lang": "en",     # language Mira speaks
 }
