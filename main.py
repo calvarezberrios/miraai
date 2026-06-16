@@ -6,6 +6,9 @@ import threading
 import time
 
 from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think, consider_speaking
+from brain.forebrain.cerebrum.frontal_lobe import motor_cortex
+from brain.forebrain.cerebrum.frontal_lobe import brocas_area
+from brain.hindbrain.cerebellum import coordinator as cerebellum
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
 from brain.forebrain.subcortical_structures import hypothalamus
 from brain.forebrain.subcortical_structures.limbic_system.amygdala import feel, color
@@ -141,6 +144,7 @@ def handle_message(event, interrupting=False):
         # She reacts to the room and recalls regardless of whether she ends up
         # speaking, so the autonomous decision has mood + memory to work with.
         feel(event.text)                              # amygdala updates mood
+        cerebellum.set_mood(amygdala.mood)            # her face follows the mood
         memories = recall(event.text)                 # hippocampus -> long-term recall
         if previous_session:
             memories = [f"From our last session: {previous_session}"] + memories
@@ -164,9 +168,11 @@ def handle_message(event, interrupting=False):
         observe(event.text, reply)
         print(f"Mira ({amygdala.mood}): {reply}\n")
 
+        cerebellum.gesture_for_speech(reply)          # gesture only if her words call for one
         adapter.pause_input()                         # don't let her hear herself
         adapter.speak(reply)
         adapter.wait_until_done()
+        cerebellum.speaking_stopped()                 # close the mouth
         if interrupting:
             adapter.flush_input()                     # drop the ramble she just answered
         adapter.resume_input()
@@ -210,6 +216,14 @@ try:
         if away > 60:
             print(f"[Mira's been away — last talked to {_humanize_gap(away)}]\n")
 
+    # Bring up the avatar (body). Non-fatal: if it can't start, the brain/voice
+    # still run headless.
+    try:
+        motor_cortex.start(open_browser=True)
+        brocas_area.set_lip_callback(cerebellum.lip)   # TTS speech energy -> mouth
+    except Exception as e:
+        print(f"[avatar not available: {e}]\n")
+
     adapter.start(on_event)
     adapter.warmup()    # heat up TTS so her first real reply is fast
 
@@ -224,6 +238,7 @@ try:
             except Exception as e:
                 print(f"[session summary skipped: {e}]\n")
             adapter.wait_until_done()                 # let her finish her last line
+            motor_cortex.stop()                       # close the avatar server
             break
         if typed:
             if args.discord:

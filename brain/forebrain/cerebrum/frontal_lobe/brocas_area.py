@@ -21,8 +21,10 @@ import re
 import subprocess
 import tempfile
 import threading
-from typing import Optional
+import time
+from typing import Callable, Optional
 
+import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
@@ -268,14 +270,101 @@ def _synthesize(text):
 
 
 # ---------------------------------------------------------------------------
+# Lip-sync — amplitude envelope streamed to the avatar's mouth during playback
+# ---------------------------------------------------------------------------
+# brocas computes a per-frame speech-energy level (0..1) from the WAV and pushes
+# it to a callback timed to playback. main.py wires the callback to the
+# cerebellum (which smooths it and drives motor_cortex.lipsync). If nothing is
+# wired, this is all inert — synthesis/playback are unaffected.
+
+_lip_cb = None                  # type: Optional[Callable[[float], None]]
+_LIP_HOP = 0.03                 # seconds per envelope frame (~33 Hz)
+
+
+def set_lip_callback(cb):
+    # type: (Optional[Callable[[float], None]]) -> None
+    """Register a sink for lip-sync levels (0..1). None disables lip-sync."""
+    global _lip_cb
+    _lip_cb = cb
+
+
+def _rms_envelope(data, sr):
+    # type: (np.ndarray, int) -> list
+    """Per-frame normalized RMS (0..1) of the audio, one value per _LIP_HOP."""
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    hop = max(1, int(sr * _LIP_HOP))
+    levels = []
+    for i in range(0, len(data), hop):
+        chunk = data[i:i + hop]
+        if chunk.size:
+            levels.append(float(np.sqrt(np.mean(chunk * chunk))))
+        else:
+            levels.append(0.0)
+    peak = max(levels) if levels else 0.0
+    if peak <= 1e-6:
+        return [0.0 for _ in levels]
+    # normalize to the loudest frame, then a little gain so normal speech opens
+    # the mouth well; clamp keeps shouts from pinning it wide.
+    return [min(1.0, (l / peak) * 1.3) for l in levels]
+
+
+def _start_lip_thread(data, sr):
+    # type: (np.ndarray, int) -> Optional[threading.Event]
+    """Walk the envelope in real time, feeding _lip_cb, in step with playback."""
+    if _lip_cb is None:
+        return None
+    levels = _rms_envelope(data, sr)
+    if not levels:
+        return None
+    stop = threading.Event()
+
+    def _run():
+        t0 = time.time()
+        for idx, level in enumerate(levels):
+            if stop.is_set():
+                break
+            try:
+                _lip_cb(level)
+            except Exception:
+                pass
+            ahead = (t0 + (idx + 1) * _LIP_HOP) - time.time()
+            if ahead > 0:
+                time.sleep(ahead)
+        try:
+            _lip_cb(0.0)            # mouth closed when the clip ends
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return stop
+
+
+def lip_drive_bytes(wav_bytes):
+    # type: (bytes) -> Optional[threading.Event]
+    """Start lip-sync from raw WAV bytes (used by the Discord voice path, which
+    plays through ffmpeg rather than _play). Returns a stop Event, or None."""
+    if _lip_cb is None:
+        return None
+    try:
+        data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+    except Exception:
+        return None
+    return _start_lip_thread(data, sr)
+
+
+# ---------------------------------------------------------------------------
 # Playback
 # ---------------------------------------------------------------------------
 
 def _play(wav_bytes):
     # type: (bytes) -> None
     data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+    stop = _start_lip_thread(data, sr)      # mouth moves in sync with the audio
     sd.play(data, sr)
     sd.wait()
+    if stop is not None:
+        stop.set()
 
 
 # ---------------------------------------------------------------------------

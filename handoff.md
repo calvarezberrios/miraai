@@ -23,9 +23,9 @@ region maps to a software module. Working through a phased build plan.
 - **Embedding model:** `nomic-embed-text` (local, for long-term memory).
 - **TTS engine:** **Piper** (replaced GPT-SoVITS), with optional **RVC** voice conversion.
   Piper generates fast English-female speech. RVC (timbre conversion to a trained `.pth`/`.index`
-  voice) is wired up but **currently DISABLED** (`USE_RVC = False` in `brocas_area.py`) because the
-  available RVC model output wasn't clean enough. Flip `USE_RVC = True` to re-enable once a
-  better-sounding model is available. With RVC off, no subprocess is launched.
+  voice) is wired up and **currently ENABLED** (`USE_RVC = True` in `brocas_area.py`); current
+  voice = **Yui (K-On!)**. Set `USE_RVC = False` to fall back to the raw Piper female voice
+  (no subprocess launched) if a model's output isn't clean enough.
 - **STT engine:** **Whisper** via **faster-whisper** (accent-robust).
 - **OS:** Windows (PowerShell). Ollama at `D:\Ollama\`, project at `D:\aiproject\`.
 - **GPU: NVIDIA GTX 1660 Super, 6GB VRAM, FULL-PRECISION ONLY.** Turing TU116 has a broken
@@ -42,6 +42,20 @@ region maps to a software module. Working through a phased build plan.
 - Local voice is the **reliable** real-time path. Discord voice works but rides an
   experimental library (see Discord section) — use local when you want smooth conversation.
 
+## NEW: Phase 5 avatar (the body) — COMPLETE (pending visual tuning of the rest-pose angles)
+- Mira now has a **VRM avatar** rendered in a local browser window (our own
+  `@pixiv/three-vrm` renderer, no third-party app). `python main.py` brings it up
+  automatically and opens the browser; capture it in OBS for streaming.
+- Driven by **`motor_cortex.py`** (the *motor cortex*): a tiny local web server (aiohttp +
+  WebSocket) that serves the renderer and streams face + gesture commands. The brain talks to the
+  **cerebellum** (`brain/hindbrain/cerebellum/coordinator.py`), which smooths/maps movement and
+  forwards to `motor_cortex`. See the "Avatar" section below.
+- **What she does:** face follows `amygdala.mood`; **lip-sync** drives the mouth from the TTS
+  amplitude envelope (local + Discord voice); body holds a **living procedural rest pose** (arms
+  down, breathing, slow head/arm drift, blink) and **blends one-shot VRMA gestures in/out of it**
+  with no snap. **Gestures are triggered by her spoken words** (greeting→wave, surprise→surprised,
+  …) — not on a random timer. See the Avatar section + Status.
+
 ---
 
 ## Environment
@@ -49,8 +63,10 @@ region maps to a software module. Working through a phased build plan.
 - `.gitignore` covers: `.venv/`, `__pycache__/`, `memory_store/`, `test_out.wav`, `.env`,
   `clock.json`.
 - Installed: `openai`, `chromadb`, `requests`, `sounddevice`, `soundfile`,
-  `faster-whisper`, `numpy`, and for Discord: **`py-cord[voice]` (PINNED — see below)** +
-  **`ffmpeg` on PATH** (for voice playback).
+  `faster-whisper`, `numpy`, **`aiohttp`** (avatar web/WS server), and for Discord:
+  **`py-cord[voice]` (PINNED — see below)** + **`ffmpeg` on PATH** (for voice playback).
+- Avatar front-end deps are **npm**, vendored under `avatar/node_modules` (run `npm install`
+  in `avatar/`); needs **Node** on PATH. See the Avatar section.
 - **CUDA DLL fix (Windows + faster-whisper):** `pip install nvidia-cublas-cu12
   "nvidia-cudnn-cu12==9.*"` AND the DLL-registration shim at the top of `wernickes_area.py`.
   Both required. Install with `python -m pip` so wheels land in the venv, not conda base.
@@ -124,6 +140,66 @@ hand-rolled default) sounds warbly by comparison. Other options: `pm` (fast/roug
 
 ---
 
+## Avatar setup — VRM in the browser (Phase 5)
+Our own renderer; no VTube Studio / VSeeFace. Everything local and free.
+
+### How it runs
+- `motor_cortex.start()` (called from `main.py`) launches an **aiohttp server on
+  `127.0.0.1:8234`** in its own thread + asyncio loop, serves `avatar/index.html`,
+  and opens the browser. A `/ws` WebSocket streams blendshape + gesture messages.
+- `avatar/index.html` loads `mira.vrm` with `@pixiv/three-vrm`, runs the render loop,
+  applies expressions (mood + lip sync) to the face, holds a **living procedural rest pose**
+  on the body, and blends one-shot VRMA gesture clips in/out of it.
+- **Brain → avatar API.** The brain talks to the **cerebellum** (`coordinator.py`) for movement;
+  it smooths/maps and forwards to `motor_cortex`, the raw output device. Both layers are safe
+  no-ops if the server is down.
+  - `cerebellum.set_mood(mood)` → `motor_cortex.set_mood(mood)` — amygdala mood → face (`MOOD_MAP`).
+  - `cerebellum.lip(level)` → `motor_cortex.lipsync(level)` — smoothed mouth viseme (driven by TTS).
+  - `cerebellum.gesture_for_speech(text)` / `cerebellum.gesture(name)` → `motor_cortex.play_gesture(name)`.
+  - `motor_cortex.set_expressions({...})` — raw blendshape targets (escape hatch).
+
+### File layout
+```
+avatar\
+├── index.html          # three-vrm renderer + WS client + procedural rest pose (breathing/sway) + blink
+├── serve.py            # standalone launcher (preview without the brain): python avatar/serve.py
+├── mira.vrm            # the avatar model (gitignored — heavy binary, dropped in by user)
+├── animations\*.vrma   # 11 gesture clips (gitignored; see licensing note)
+├── package.json        # pins three + three-vrm + three-vrm-animation
+└── node_modules\       # vendored deps (gitignored; reproduce with `npm install` in avatar/)
+```
+
+### Dependencies (vendored locally, offline-friendly)
+- `three@0.169`, `@pixiv/three-vrm@3.5.3`, `@pixiv/three-vrm-animation@3.x` — installed
+  via `npm install` in `avatar/` (Node present). Loaded in `index.html` through an
+  importmap pointing at `/node_modules/...`. Nothing fetched from a CDN at runtime.
+
+### Gestures (VRMA)
+- 11 free `.vrma` clips pulled from the MIT repo `tk256ailab/vrm-viewer` into
+  `avatar/animations/`. Friendly names → files in `GESTURES` (motor_cortex) / `GESTURES`
+  (index.html): wave→Goodbye, thinking→Thinking, clapping→Clapping, flirty→Blush,
+  plus surprised/angry/sad/jump/sleepy/look (the `Relax`/`LookAround` "idle"/"talking" entries
+  are no longer auto-played — see below).
+- **Idle is NOT a clip.** It's the procedural rest pose in the render loop (bind pose + arms down
+  + breathing/head-drift/arm-sway). One-shot gestures are triggered by her **spoken words**
+  (`cerebellum.gesture_for_speech`), blend in fast and ease back to the rest pose (`gestureWeight`,
+  `GESTURE_IN`/`GESTURE_OUT`) — no clip-to-clip snap, no looping-idle snap, no random firing.
+- **⚠ Licensing:** those clips' original provenance is undocumented (demo assets). Kept
+  gitignored / local-only. For streaming/monetizing, swap in the unambiguously-free
+  **VRoid official 7-pack** (https://vroid.booth.pm/items/5512385, manual BOOTH download).
+
+### Streaming / rendering note
+- The render loop uses `requestAnimationFrame` (smooth when the window is visible).
+  Browsers **throttle background tabs** — a low-fps `setInterval` fallback keeps her from
+  freezing if minimised, but for real capture use an **OBS Browser Source** (no throttling)
+  or keep the window visible. Background is CSS chroma green (`#00b140`); canvas is
+  transparent over it. Press `h` in the window to hide the debug HUD.
+- Debug keys in the window: `1`–`6` expressions, `0` reset, `q/w/e/r/t/y/u` gestures,
+  `p` toggle the procedural rest pose. Console: `__mira.state()` (shows `gestureWeight`/`restEnabled`),
+  `__mira.play(name)`, `__mira.setRest('leftUpperArm', x, y, z)` to live-tune arm angles.
+
+---
+
 ## Folder structure (current)
 ```
 D:\aiproject\
@@ -132,26 +208,32 @@ D:\aiproject\
 ├── clock.json              # persistent last-active timestamp (gitignored)
 ├── PRIVACY_POLICY.md       # template (placeholders to fill: operator, contact, date, jurisdiction)
 ├── TERMS_OF_SERVICE.md     # template (same placeholders)
+├── avatar\                             # [NEW] the body — browser VRM renderer (NOT a brain region)
+│   ├── index.html / serve.py / mira.vrm / animations\*.vrma / node_modules\
 ├── peripheral_nervous_system\          # [NEW] swappable I/O substrate (NOT a brain region)
 │   ├── io_adapter.py        # IOAdapter base + InputEvent dataclass + FINAL/PARTIAL/INTERRUPT
 │   ├── local_adapter.py     # mic + speakers (wraps wernickes + brocas); local mode
 │   └── discord_adapter.py   # Discord bot: text + voice (py-cord); the big one
 └── brain\
-    └── forebrain\
-        ├── cerebrum\
-        │   ├── frontal_lobe\
-        │   │   ├── prefrontal_cortex.py   # persona + GROUNDING + think() + consider_speaking()
-        │   │   ├── brocas_area.py         # TTS: GPT-SoVITS pipeline
-        │   │   └── voice\reference.wav
-        │   └── temporal_lobe\
-        │       └── wernickes_area.py      # STT: faster-whisper (+ public transcribe())
-        └── subcortical_structures\
-            ├── basal_ganglia\
-            │   └── action_selector.py     # should_respond() addressed-detection + engagement window
-            ├── hypothalamus.py            # [NEW] persistent clock (last_active across restarts)
-            └── limbic_system\
-                ├── amygdala.py            # emotion state that colors responses
-                └── hippocampus.py         # long-term memory + consolidation
+    ├── forebrain\
+    │   ├── cerebrum\
+    │   │   ├── frontal_lobe\
+    │   │   │   ├── prefrontal_cortex.py   # persona + GROUNDING + think() + consider_speaking()
+    │   │   │   ├── brocas_area.py         # TTS: Piper (+ optional RVC) pipeline + lip-sync envelope
+    │   │   │   ├── motor_cortex.py        # [NEW] avatar server: face (mood) + body (VRMA gestures)
+    │   │   │   └── voice\reference.wav
+    │   │   └── temporal_lobe\
+    │   │       └── wernickes_area.py      # STT: faster-whisper (+ public transcribe())
+    │   └── subcortical_structures\
+    │       ├── basal_ganglia\
+    │       │   └── action_selector.py     # should_respond() addressed-detection + engagement window
+    │       ├── hypothalamus.py            # [NEW] persistent clock (last_active across restarts)
+    │       └── limbic_system\
+    │           ├── amygdala.py            # emotion state that colors responses
+    │           └── hippocampus.py         # long-term memory + consolidation
+    └── hindbrain\                         # [NEW]
+        └── cerebellum\
+            └── coordinator.py             # [NEW] lip smoothing + spoken-word→gesture mapping + mood→face
 ```
 Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapters feed it.
 
@@ -188,11 +270,41 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 - Local continuous-listening behavior unchanged. Added a public **`transcribe(f32_16k_mono)`**
   so non-mic sources (Discord) reuse Whisper without opening the mic. DLL shim must stay first.
 
+### motor_cortex.py — [NEW] the body (avatar output)
+- Hosts the avatar web server (aiohttp + WebSocket on `127.0.0.1:8234`) in its own thread;
+  serves `avatar/` and streams face/gesture commands to the renderer. See the Avatar section.
+- Public API: `start()/stop()`, `set_mood(mood)` (→ `MOOD_MAP` expression), `lipsync(level)`
+  (mouth viseme; driven by TTS via the cerebellum), `play_gesture(name)` (→ `GESTURES` VRMA clips),
+  `set_expressions({...})`. All non-throwing — if the server isn't up, calls are no-ops, so
+  the brain/voice run fine headless.
+- **All responses are served `no-store`** (a small aiohttp middleware). Without it Chrome
+  aggressively caches the localhost HTML + ES modules and keeps running a **stale `index.html`**
+  across reloads/relaunches — so renderer edits silently appear to do nothing. If you ever edit
+  the renderer and see no change, hard-reload (`Ctrl+Shift+R`); `__mira.state()` confirms the
+  loaded build.
+- `motor_cortex` stays the raw output device; the **cerebellum** (below) is now the front door
+  the brain uses for movement, and it forwards smoothed/timed commands here.
+
+### cerebellum/coordinator.py — [NEW] the cerebellum (movement coordination)
+- Sits between movement *intent* (the brain) and raw output (`motor_cortex`). Jobs:
+  (1) **smooths the lip-sync** signal (fast attack / slower decay) before broadcast (`lip()`);
+  (2) maps her **spoken words → a body gesture** (`gesture_for_speech(text)` against
+  `_SPEECH_GESTURES`); (3) forwards **mood → face** (`set_mood`). `speaking_stopped()` closes the
+  mouth. No background thread, no random gestures — the living idle is procedural in the renderer.
+- Public API: `set_mood(mood)`, `gesture(name)`, `gesture_for_speech(text)`, `speaking_stopped()`,
+  `lip(level)`. All forward to `motor_cortex` (safe no-ops headless). `main.py` wires
+  `brocas_area.set_lip_callback(cerebellum.lip)`.
+
 ### main.py — adapter-routed loop
 - Picks LocalAdapter or DiscordAdapter at launch; everything flows through `on_event`.
 - `handle_message(event)`: ingests every utterance → detects addressed → **addressed/interrupt
   → think(); else → consider_speaking()** (silent = logged `[heard:quiet]`). Builds a
   time/place/silence "situation" note (per-channel + cross-restart via hypothalamus).
+- **[NEW] Avatar:** starts `motor_cortex` (server/browser) at launch and wires
+  `brocas_area.set_lip_callback(cerebellum.lip)`. Per turn it calls `cerebellum.set_mood(amygdala.mood)`
+  (face follows mood), then `cerebellum.gesture_for_speech(reply)` right before speaking (plays a
+  gesture only if her words call for one) and `cerebellum.speaking_stopped()` after. `motor_cortex.stop()`
+  on quit. Avatar startup is wrapped — failure is non-fatal.
 - PARTIAL display is a single-line rolling caption (truncated to terminal width) so live
   transcription doesn't wrap and stack into repeats.
 
@@ -271,14 +383,89 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 
 ---
 
-## NEXT: Phase 5 — Body (avatar)
-Per the build plan:
-- **VTube Studio API or VRM control** — lip sync + expressions tied to the amygdala mood state
-  → *motor cortex*.
-- **Animation smoothing / timing** → *cerebellum*.
-- Tie-in: the emotion state (`amygdala.mood`) already exists and colors replies — drive
-  expressions from it. Lip sync can hang off the TTS playback in `brocas_area` / the adapter's
-  voice-out path. (Then loop back for the deferred Phase 4 idle behaviors once she's visible.)
+### PHASE 5 — BODY (avatar): COMPLETE ✅ (pending visual tuning of the rest-pose angles)
+Decided: **own browser renderer** (VRM via `@pixiv/three-vrm`), not VTube Studio/VSeeFace.
+Built in 5 steps; see the Avatar section for setup. Status:
+- ✅ **Step 1 — renderer + server.** `motor_cortex` aiohttp/WS server serves `avatar/index.html`;
+  loads `mira.vrm`, faces camera, chroma-green bg, idle blink/breathing. Verified rendering.
+- ✅ **Step 2 — expressions ← mood.** `main.py` calls `set_mood(amygdala.mood)` per message;
+  `MOOD_MAP` → VRM expression presets (happy/angry/sad/relaxed/surprised). Verified.
+- ✅ **(asked for) VRMA gestures.** 11 clips load via `@pixiv/three-vrm-animation`; `play_gesture()`
+  one-shots blend in over the procedural rest pose and ease back (see Step 5).
+- ✅ **Step 3 — cerebellum smoothing/timing.** New `brain/hindbrain/cerebellum/coordinator.py`.
+  Smooths the lip-sync signal (fast attack / slower decay) before it hits the socket, times the
+  deliberate gestures, and gates idle behavior while she's busy. The brain now talks to the
+  cerebellum for movement; it forwards to `motor_cortex`. (Face mood/lip still lerp in the browser.)
+- ✅ **Step 4 — lip sync from TTS.** `brocas_area` computes a real-time RMS amplitude envelope and
+  streams it (via `set_lip_callback` → cerebellum → `motor_cortex.lipsync`) timed to playback —
+  **both** local (`_play`) and Discord voice (`_play_wav_in_vc` via `lip_drive_bytes`). Mouth `aa`
+  viseme was already wired; this supplies the audio-driven values.
+- ✅ **Step 5 — idle behaviors + rest pose + behavioral wiring.** Idle is **no longer a looping
+  VRMA clip** (it snapped on each loop and tilted her head back). Idle is a **living procedural
+  pose** in `index.html`: the model's captured **bind pose** (upright, facing the camera) with the
+  arms overridden down at the sides, plus **breathing + slow head drift + faint arm sway** (layered
+  unrelated sines, so non-repetitive) and blink. A `gestureWeight` blends the **whole body** between
+  that rest pose and the active gesture clip with an **asymmetric** rate — fast in (`GESTURE_IN`
+  0.12s) so the clip's full arm motion plays instead of being fought by the rest pose, slow out
+  (`GESTURE_OUT` 0.5s) so the return doesn't snap. The full bind pose is the blend target, so no
+  bones freeze after a gesture.
+  - **Gestures are driven by her SPOKEN words, not a timer.** When she starts a line,
+    `cerebellum.gesture_for_speech(reply)` scans it against `_SPEECH_GESTURES` (greeting→wave,
+    surprise→surprised, …) and plays at most one; otherwise she just stands and talks facing the
+    camera. The old random idle-gesture scheduler and the thinking/greet gestures were **removed**
+    at the user's request.
+  - **⚠ Rest-pose arm angles need a visual pass on the real model.** The four arm Eulers in `POSE`
+    (`index.html`, ~68° down) depend on the rig. Tune live in the browser console:
+    `__mira.setRest('leftUpperArm', 0, 0, -1.2)`; press `p` to toggle the rest pose; `__mira.state()`
+    shows `gestureWeight`/`restEnabled`.
+
+---
+
+### PHASE 6 — SENSES: NOT STARTED (this is next)
+Goal: Mira can **see** what's on screen (the game) and **hear** non-speech audio events
+(alerts/donations/sounds), and react to both — grounded, so she only references what the senses
+actually reported (same anti-confabulation rule as everything else).
+
+Anatomy / where the code goes (new brain regions, mirror the existing tree):
+- **Visual cortex** → `brain/forebrain/cerebrum/occipital_lobe/visual_cortex.py` (new `occipital_lobe/`).
+- **Auditory cortex** (non-speech sound) → `brain/forebrain/cerebrum/temporal_lobe/auditory_cortex.py`
+  (sits beside `wernickes_area.py`, which stays the *language* path).
+- Both feed the brain through the existing relay: emit an `InputEvent` (new `channel`, e.g.
+  `"vision"` / `"event"`) or fold into the `describe_situation` note in `main.py` — no new brain
+  branching needed.
+
+Steps:
+- ⬜ **Step 1 — screen capture (frame source).** Grab a screen region (game window / a monitor) at a
+  LOW rate (~0.5–1 fps) with **`mss`** (fast, local, free). Config: which region, which fps. Keep the
+  latest frame in memory; don't save to disk. → `visual_cortex.py`.
+- ⬜ **Step 2 — see the frame (local VLM).** Describe the frame with a **small local vision model via
+  Ollama** (e.g. `qwen2.5vl:3b` / `moondream` / `llava`), producing a one-line scene description.
+  ⚠ **VRAM is the wall:** a VLM + chat LLM + Whisper + TTS will NOT co-reside in 6GB. Plan to
+  time-share — describe only occasionally (every N seconds or on demand), and/or pause STT while the
+  VLM runs, the same squeeze pattern as the rest of the project. Set the VLM model in ONE constant.
+- ⬜ **Step 3 — wire vision into context.** Inject the latest scene description into the `situation`
+  note (or as a low-priority `InputEvent`) so `think()`/`consider_speaking()` can comment on the
+  game. Grounding: she may only mention what the description contains — if vision is off/empty, she
+  doesn't pretend to see.
+- ⬜ **Step 4 — auditory cortex (events).** Detect non-speech events. Two sources, easiest first:
+  (a) **platform/event webhooks** (Twitch/YouTube/StreamElements donation·sub·raid) — reliable, and
+  ties into the deferred Phase-4 RAS prioritization; (b) **system-audio event detection** (alert
+  sound onset/template match) for sounds without an API. Map events → an `amygdala` mood bump
+  (donation → `excited`) + a one-shot utterance trigger ("thank the donor by name", grounded in the
+  event payload). → `auditory_cortex.py`.
+- ⬜ **Step 5 — react with the body.** Reuse Phase 5: an event/scene can set mood (face) and, via the
+  speech→gesture map, play a fitting gesture (e.g. donation → `clapping`/`jump`). No new avatar work.
+
+First concrete task for the next session: **Step 1** — add `occipital_lobe/visual_cortex.py` with an
+`mss`-based capture loop exposing `latest_frame()` / `start()/stop()`, region+fps constants, behind a
+master `USE_VISION` switch (off by default so the base app is unaffected). Then Step 2 on top.
+
+### PHASE 7 — HOMEOSTASIS (polish): NOT STARTED
+- ⬜ **Energy/mood decay over stream time + a true scheduler** → extends `hypothalamus.py` (it already
+  persists the clock but does no background processing yet). Mood drifts toward baseline over time;
+  scheduled behaviors fire on a timer.
+- ⬜ **Self-correction** → *anterior cingulate*: detect bad/off outputs (refusals, format leaks,
+  repetition) and retry/filter before they reach TTS.
 
 ## Working style for next session
 - Step by step, one step at a time, not verbose.

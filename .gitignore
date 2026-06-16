@@ -69,6 +69,13 @@ test_rvc.wav
 # Piper voice models (large ONNX files)
 piper_voices/
 
+# Avatar renderer deps — vendored via `npm install` in avatar/ (package.json kept).
+# node_modules is large and reproducible; the .vrm model is a heavy binary asset.
+avatar/node_modules/
+avatar/mira.vrm
+# VRMA gesture clips — local-only assets (verify rights before redistributing)
+avatar/animations/
+
 # RVC model files / archives (placed by user, not in repo) — ignore the whole dir
 rvc_models/
 *.zip

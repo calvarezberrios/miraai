@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mira</title>
+  <style>
+    :root { --chroma: #00b140; }            /* OBS chroma-key green */
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--chroma); }
+    #stage { width: 100vw; height: 100vh; display: block; }
+    #hud {
+      position: fixed; left: 8px; bottom: 8px; font: 12px/1.4 monospace;
+      color: #fff; background: rgba(0,0,0,.45); padding: 6px 8px; border-radius: 6px;
+      white-space: pre; pointer-events: none; opacity: .85; max-width: 60vw;
+      display: none;
+    }
+    #hud.hide { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="hud">booting…</div>
+
+  <!-- All deps are vendored locally under /node_modules (npm install in avatar/). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/node_modules/three/build/three.module.js",
+      "three/addons/": "/node_modules/three/examples/jsm/",
+      "@pixiv/three-vrm": "/node_modules/@pixiv/three-vrm/lib/three-vrm.module.js",
+      "@pixiv/three-vrm-animation": "/node_modules/@pixiv/three-vrm-animation/lib/three-vrm-animation.module.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+    import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
+
+    const hud = document.getElementById('hud');
+    const log = (m) => { hud.textContent = m; console.log('[mira-avatar]', m); };
+    addEventListener('keydown', (e) => { if (e.key === 'h') hud.classList.toggle('hide'); });
+
+    // --- three.js scene ----------------------------------------------------
+    const canvas = document.getElementById('stage');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true,
+                                               preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+    camera.position.set(0, 1.3, 1.9);      // upper-body framing (room for gestures)
+
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(1, 2, 2);
+    scene.add(key);
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+    // --- expression state (face = mood + lipsync; bones = gestures) ---------
+    const EXPR = ['neutral', 'happy', 'angry', 'sad', 'relaxed', 'surprised'];
+    const MOUTH = 'aa';
+    const target = {}, value = {};
+    for (const e of [...EXPR, MOUTH]) { target[e] = 0; value[e] = 0; }
+    target.neutral = 1;
+
+    // --- gesture catalogue: friendly name -> VRMA filename stem -------------
+    const GESTURES = {
+      idle: 'Relax', talking: 'LookAround', wave: 'Goodbye', thinking: 'Thinking',
+      clapping: 'Clapping', flirty: 'Blush', surprised: 'Surprised', angry: 'Angry',
+      sad: 'Sad', jump: 'Jump', sleepy: 'Sleepy', look: 'LookAround',
+    };
+    const IDLE = 'idle';
+    const FADE = 0.45;
+
+    // --- relaxed standing rest pose -----------------------------------------
+    // Idle is NOT a looping clip (those snapped on loop and tilted her head
+    // back). Instead idle is this procedural pose: the model's own bind pose
+    // (upright, facing the camera) with the arms brought down to the sides.
+    // A single eased weight (gestureWeight) blends between this pose and the
+    // active gesture clip, so every transition — into a gesture and back — is a
+    // smooth blend from the current position, never a snap. Tunable live:
+    // window.__mira.setRest('leftUpperArm', x, y, z) (radians).
+    const E = (x, y, z) => new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z));
+    let humanoid = null;
+    const bindPose = {};                  // boneName -> bind quaternion (captured at load)
+    const bindHips = new THREE.Vector3(); // bind hips position (so e.g. Jump returns home)
+    const POSE = {};                      // rest targets: bind pose, arms overridden down
+    let gestureWeight = 0;                // 0 = full rest pose, 1 = full gesture clip
+    // Grab the body FAST when a gesture starts (so the clip's full arm motion
+    // plays, not a half-raise fought by the rest pose), and ease back to rest
+    // SLOWLY so the return doesn't snap.
+    const GESTURE_IN = 0.12, GESTURE_OUT = 0.5;
+    let restEnabled = true, fadeOut = null;
+    let idleT = 0;                        // idle-motion clock (breathing + sway)
+    const _q = new THREE.Quaternion(), _e = new THREE.Euler();
+
+    let vrm = null, mixer = null;
+    const clips = {};                 // friendly name -> THREE.AnimationClip
+    let currentGesture = null;
+    let blinkTimer = 0, nextBlink = 1.5, blinkPhase = -1;
+
+    // --- load VRM, then its animation clips --------------------------------
+    const loader = new GLTFLoader();
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+
+    //log('loading mira.vrm …');
+    loader.load('/mira.vrm', async (gltf) => {
+      vrm = gltf.userData.vrm;
+      VRMUtils.removeUnnecessaryVertices(gltf.scene);
+      VRMUtils.combineSkeletons(gltf.scene);
+      VRMUtils.rotateVRM0(vrm);
+      vrm.scene.traverse((o) => { o.frustumCulled = false; });
+      scene.add(vrm.scene);
+
+      humanoid = vrm.humanoid;
+      // Capture the model's bind pose so a gesture can always blend the whole
+      // body back to a clean rest, then override the arms to hang at the sides.
+      for (const name of Object.keys(vrm.humanoid.humanBones || {})) {
+        const node = vrm.humanoid.getNormalizedBoneNode(name);
+        if (node) bindPose[name] = node.quaternion.clone();
+      }
+      Object.assign(POSE, bindPose);
+      POSE.leftUpperArm  = E(0.08, 0, -1.18);   // arms down at the sides, slightly forward
+      POSE.rightUpperArm = E(0.08, 0,  1.18);
+      POSE.leftLowerArm  = E(0, -0.18, -0.12);  // natural relaxed elbow bend
+      POSE.rightLowerArm = E(0,  0.18,  0.12);
+      const hipsNode = vrm.humanoid.getNormalizedBoneNode('hips');
+      if (hipsNode) bindHips.copy(hipsNode.position);
+
+      mixer = new THREE.AnimationMixer(vrm.scene);
+      mixer.addEventListener('finished', (e) => {
+        // A one-shot gesture ended: let it hold its last frame while the rest-
+        // pose blend (gestureWeight -> 0) eases the whole body back to standing,
+        // then it gets stopped in the render loop. No snap to a new clip.
+        if (e.action === currentGesture) { fadeOut = e.action; currentGesture = null; }
+        else { e.action.stop(); }
+      });
+
+      await loadGestures();
+      // No looping idle clip — idle is the procedural rest pose (render loop),
+      // kept alive by breathing, blinking, and occasional autonomous gestures.
+
+      const present = EXPR.concat(MOUTH, 'blink')
+        .filter((n) => vrm.expressionManager && vrm.expressionManager.getExpression(n));
+     // log('ready. gestures: ' + Object.keys(clips).join(', ')
+     //     + '\nexpressions: ' + present.join(', '));
+    }, undefined, (err) => log('VRM load FAILED: ' + err));
+
+    async function loadGestures() {
+      const aLoader = new GLTFLoader();
+      aLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+      const names = [...new Set(Object.entries(GESTURES))];   // [name, stem] pairs
+      await Promise.all(names.map(async ([name, stem]) => {
+        try {
+          const g = await aLoader.loadAsync(`/animations/${stem}.vrma`);
+          const va = g.userData.vrmAnimations && g.userData.vrmAnimations[0];
+          if (va) clips[name] = createVRMAnimationClip(va, vrm);
+        } catch (err) { console.warn('[mira-avatar] gesture load failed:', name, err); }
+      }));
+    }
+
+    function playGesture(name) {
+      if (!mixer || name === IDLE) return;          // idle is the procedural rest pose
+      const clip = clips[name];
+      if (!clip) { console.warn('[mira-avatar] unknown gesture:', name); return; }
+      const action = mixer.clipAction(clip);
+      action.reset();
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+      // rest -> gesture is cushioned by the gestureWeight ramp (render loop), so
+      // it blends from her current pose. gesture -> gesture (rare) crossfades the
+      // clips directly. Either way: no snap to the clip's first frame.
+      if (currentGesture && currentGesture !== action) action.crossFadeFrom(currentGesture, FADE, true);
+      action.play();
+      currentGesture = action;
+    }
+
+    // Add a small local rotation onto a humanoid bone (for breathing/idle sway).
+    // Applied after the rest-pose slerp re-anchors the bone, so it never drifts.
+    function addLocal(name, x, y, z) {
+      const b = humanoid && humanoid.getNormalizedBoneNode(name);
+      if (!b) return false;
+      b.quaternion.multiply(_q.setFromEuler(_e.set(x, y, z)));
+      return true;
+    }
+
+    // --- WebSocket from motor_cortex ---------------------------------------
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onclose = () => setTimeout(connect, 1000);
+      ws.onerror = () => ws.close();
+      ws.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === 'blendshapes' && msg.values) {
+          for (const [k, v] of Object.entries(msg.values))
+            if (k in target) target[k] = Math.max(0, Math.min(1, v));
+        } else if (msg.type === 'gesture' && msg.name) {
+          playGesture(msg.name);
+        }
+      };
+    }
+    connect();
+
+    // --- render loop -------------------------------------------------------
+    // Primary driver is requestAnimationFrame (smooth when the window is
+    // visible). Browsers PAUSE rAF for hidden/background tabs, which would
+    // freeze the avatar if its window is minimised; a low-rate setInterval
+    // fallback keeps it rendering (~1fps when hidden) instead of freezing.
+    // For streaming, capture via an OBS Browser Source (no throttling at all)
+    // or keep the window visible.
+    let last = performance.now();
+    function renderFrame(dt) {
+      for (const e of [...EXPR, MOUTH])
+        value[e] += (target[e] - value[e]) * Math.min(1, dt * 12);
+
+      blinkTimer += dt;
+      let blink = 0;
+      if (blinkPhase < 0 && blinkTimer >= nextBlink) blinkPhase = 0;
+      if (blinkPhase >= 0) {
+        blinkPhase += dt / 0.12;
+        blink = blinkPhase < 1 ? Math.sin(Math.min(blinkPhase, 1) * Math.PI) : 0;
+        if (blinkPhase >= 1) { blinkPhase = -1; blinkTimer = 0; nextBlink = 1.5 + Math.random() * 4; }
+      }
+
+      if (mixer) mixer.update(dt);            // gestures drive the body
+
+      // Blend the whole body between the active gesture clip and the relaxed
+      // front-facing rest pose. gestureWeight eases 0..1, so EVERY transition —
+      // rest -> gesture and gesture -> rest — is a smooth blend from her current
+      // position rather than a snap. With no gesture this holds her standing
+      // calmly and facing the camera (only breathing + blink move).
+      if (humanoid && restEnabled) {
+        const want = currentGesture ? 1 : 0;
+        const tau = want ? GESTURE_IN : GESTURE_OUT;     // fast in, slow out
+        gestureWeight += (want - gestureWeight) * Math.min(1, dt / tau);
+        const restAmt = 1 - gestureWeight;
+        if (restAmt > 0.001) {
+          // settle the whole body toward the relaxed standing pose...
+          for (const name in POSE) {
+            const b = humanoid.getNormalizedBoneNode(name);
+            if (b) b.quaternion.slerp(POSE[name], restAmt);
+          }
+          const hips = humanoid.getNormalizedBoneNode('hips');
+          if (hips) hips.position.lerp(bindHips, restAmt);
+
+          // ...then add gentle, organic life on top (scaled by restAmt so it
+          // fades out under a gesture). Layered slow sines at unrelated rates
+          // make it non-repetitive — breathing, a slow head drift, a faint sway.
+          idleT += dt;
+          const a = restAmt;
+          const breathe  = Math.sin(idleT * 0.8) * 0.05;                          // chest rise/fall
+          const headNod  = Math.sin(idleT * 0.45) * 0.025 + Math.sin(idleT * 0.19) * 0.02;
+          const headTurn = Math.sin(idleT * 0.33) * 0.05;
+          const headTilt = Math.sin(idleT * 0.27) * 0.025;
+          const armSway  = Math.sin(idleT * 0.4) * 0.03 + Math.sin(idleT * 0.17) * 0.02;
+          if (!addLocal('chest', breathe * a, 0, 0)) addLocal('spine', breathe * a, 0, 0);
+          addLocal('head', headNod * a, headTurn * a, headTilt * a);
+          addLocal('leftUpperArm', 0, 0, -armSway * a);
+          addLocal('rightUpperArm', 0, 0,  armSway * a);
+        }
+        // gesture fully faded back to rest -> free the clamped action
+        if (!currentGesture && gestureWeight < 0.02 && fadeOut) { fadeOut.stop(); fadeOut = null; }
+      }
+
+      if (vrm) {
+        const em = vrm.expressionManager;
+        if (em) {                              // mood + lipsync override the face
+          for (const e of EXPR) em.setValue(e, value[e]);
+          em.setValue(MOUTH, value[MOUTH]);
+          em.setValue('blink', blink);
+        }
+        vrm.update(dt);
+      }
+      renderer.render(scene, camera);
+    }
+    function tick() {
+      const now = performance.now();
+      renderFrame(Math.min((now - last) / 1000, 0.05));
+      last = now;
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+    setInterval(() => {                        // hidden-tab fallback
+      if (!document.hidden) return;            // rAF handles the visible case
+      const now = performance.now();
+      renderFrame(Math.min((now - last) / 1000, 0.2));
+      last = now;
+    }, 33);
+
+    // Debug hook so tooling can inspect/drive the avatar headlessly.
+    window.__mira = {
+      state: () => ({
+        gesture: currentGesture ? currentGesture.getClip().name : null,
+        clips: Object.keys(clips),
+        expr: { ...value },
+        gestureWeight, restEnabled,
+        hidden: document.hidden,
+      }),
+      play: (n) => playGesture(n),
+      // Live-tune the rest pose, e.g. __mira.setRest('leftUpperArm', 0, 0, -1.3)
+      setRest: (name, x, y, z) => { POSE[name] = E(x, y, z); },
+    };
+
+    addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Debug keys: 1-6 expressions, 0 reset; q/w/e/r/t/y/u gestures.
+    addEventListener('keydown', (e) => {
+      const ex = { '1': 'happy', '2': 'angry', '3': 'sad', '4': 'relaxed', '5': 'surprised', '6': 'aa' };
+      const ge = { q: 'wave', w: 'thinking', e: 'clapping', r: 'flirty', t: 'talking', y: 'surprised', u: 'jump' };
+      if (e.key === '0') { for (const x of [...EXPR, MOUTH]) target[x] = 0; target.neutral = 1; }
+      else if (e.key === 'p') { restEnabled = !restEnabled; }   // toggle arms-down rest pose
+      else if (ex[e.key]) { for (const x of [...EXPR, MOUTH]) target[x] = 0; target[ex[e.key]] = 1; }
+      else if (ge[e.key]) playGesture(ge[e.key]);
+    });
+  </script>
+</body>
+</html>

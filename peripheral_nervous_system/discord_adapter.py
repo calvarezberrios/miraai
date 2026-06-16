@@ -665,11 +665,15 @@ class DiscordAdapter(IOAdapter):
                 vc.stop()
             vc.play(source, after=_after)
 
+        lip_stop = self._brocas.lip_drive_bytes(wav_bytes)   # move the mouth in time
         try:
             asyncio.run_coroutine_threadsafe(_do_play(), self._loop).result(timeout=15)
             done.wait(timeout=120)
         except Exception as e:
             print(f"[Discord voice] play failed: {e}")
+        finally:
+            if lip_stop is not None:
+                lip_stop.set()
 
     def wait_until_done(self) -> None:
         # text send blocks in _speak_text; voice playback blocks in _play_wav_in_vc
