@@ -1,5 +1,7 @@
 # Virtual environments
 .venv/
+# dedicated Python 3.10 venv for the Kokoro TTS subprocess
+.venv-kokoro/
 venv/
 env/
 

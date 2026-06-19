@@ -36,8 +36,11 @@ AVATAR_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", "..", "..", "..", "avatar")
 )
-HOST = "127.0.0.1"
-PORT = 8234
+# Bind address/port for the avatar web server. Defaults are fine for local use;
+# on a server (e.g. RunPod) set MIRA_AVATAR_HOST=0.0.0.0 so the port can be
+# exposed and captured in OBS over the network.
+HOST = os.environ.get("MIRA_AVATAR_HOST", "127.0.0.1")
+PORT = int(os.environ.get("MIRA_AVATAR_PORT", "8234"))
 
 # VRM1 expression presets we drive. three-vrm maps VRM0 blendshape groups onto
 # these same names (joy->happy, sorrow->sad, fun->relaxed, a->aa), so one set of

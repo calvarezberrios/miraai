@@ -5,9 +5,24 @@ import sys
 import threading
 import time
 
-from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think, consider_speaking
+# The local model occasionally slips an emoji into a reply despite the persona,
+# and Mira now also prints lines from a background thread (the subconscious). On a
+# legacy-codepage Windows console that would raise UnicodeEncodeError mid-turn, so
+# make console output lossy-safe rather than fatal.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+# Load .env into os.environ BEFORE importing brain modules — several of them
+# (e.g. prefrontal_cortex's MIRA_MODEL) read their config at import time.
+from env_loader import load_env
+load_env()
+
+from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think
 from brain.forebrain.cerebrum.frontal_lobe import motor_cortex
 from brain.forebrain.cerebrum.frontal_lobe import brocas_area
+from brain.forebrain.cerebrum.cingulate_cortex import posterior_cingulate_cortex as subconscious
 from brain.hindbrain.cerebellum import coordinator as cerebellum
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
 from brain.forebrain.subcortical_structures import hypothalamus
@@ -109,64 +124,33 @@ def describe_situation(event, prev_seen, now):
     return " ".join(parts)
 
 
-def handle_message(event, interrupting=False):
+def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
+                speaker=None, source="reply"):
+    """The one and only "Mira speaks" sequence, shared by the conscious foreground
+    (directly-addressed turns) and the subconscious (overheard chime-ins, spoken
+    daydreams). The turn_lock serializes it, so two lines can never overlap on the
+    voice/avatar no matter which part of her mind started them.
+
+    user_text is the message she's replying to (None for a spontaneous daydream)."""
     global message_count, last_consolidation
+    if not (reply and reply.strip()):
+        return
+    # A daydream is something she muses ALOUD, not part of the conversation: it must
+    # never enter the chat log (working memory / session log) — it already lives in
+    # her private subconscious_log. Real replies and chime-ins do get logged.
+    is_daydream = source == "daydream"
     with turn_lock:
-        now = time.time()
+        if not is_daydream:
+            remember_reply(reply)
+            observe(user_text if user_text is not None else "", reply)
 
-        # She follows the whole room: every message updates short-term context,
-        # whether or not she ends up replying to it.
-        context = receive(event.text)
-
-        chan_key = getattr(event.raw, "id", None)
-        chan_key = str(chan_key) if chan_key is not None else event.channel
-
-        # silence tracking: gap since the previous message, then mark this one.
-        # On the first message after a restart, bridge from the persisted
-        # last-active time so she knows how long she was away.
-        prev_seen = _last_seen.get(chan_key)
-        if prev_seen is None and _startup_last_active is not None:
-            prev_seen = _startup_last_active
-        _last_seen[chan_key] = now
-        hypothalamus.touch(now)               # persist "last talked to" across restarts
-
-        # Is she being directly addressed? (name / @ / reply / DM)
-        addressed = False
-        if not interrupting:
-            decision = should_respond(
-                event.text,
-                mentioned=getattr(event, "mentioned", False),
-                reply_to_her=getattr(event, "reply_to_her", False),
-                channel=chan_key,
-            )
-            addressed = decision.respond and decision.reason == "addressed"
-
-        # She reacts to the room and recalls regardless of whether she ends up
-        # speaking, so the autonomous decision has mood + memory to work with.
-        feel(event.text)                              # amygdala updates mood
-        cerebellum.set_mood(amygdala.mood)            # her face follows the mood
-        memories = recall(event.text)                 # hippocampus -> long-term recall
-        if previous_session:
-            memories = [f"From our last session: {previous_session}"] + memories
-
-        flavor = color() + (INTERRUPT_NOTE if interrupting else "")
-        situation = describe_situation(event, prev_seen, now)
-
-        if interrupting or addressed:
-            # Directly addressed (or a long-ramble interrupt) -> she always answers.
-            reply = think(context, flavor, memories, situation=situation)
+        if is_daydream:
+            print(f"\nMira (daydream, {amygdala.mood}): {reply}\n")
         else:
-            # Not addressed -> she decides for herself whether to jump in.
-            reply = consider_speaking(context, flavor, memories, situation=situation)
-            if not reply:
-                if LOG_HEARD:
-                    print(f"[heard:quiet] {event.speaker}: {event.text}")
-                return
-
-        print(f"\n{event.speaker}: {event.text}")
-        remember_reply(reply)
-        observe(event.text, reply)
-        print(f"Mira ({amygdala.mood}): {reply}\n")
+            if speaker and user_text is not None:
+                print(f"\n{speaker}: {user_text}")
+            tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
+            print(f"{tag}: {reply}\n")
 
         cerebellum.gesture_for_speech(reply)          # gesture only if her words call for one
         adapter.pause_input()                         # don't let her hear herself
@@ -177,16 +161,86 @@ def handle_message(event, interrupting=False):
             adapter.flush_input()                     # drop the ramble she just answered
         adapter.resume_input()
 
-        # She spoke -> keep the active-conversation window alive for this channel,
-        # so follow-ups get relevance-checked instead of needing her name again.
-        mark_engaged(chan_key)
+        if not is_daydream:
+            # She replied -> keep the active-conversation window alive for this
+            # channel, so follow-ups get relevance-checked without re-addressing.
+            mark_engaged(channel)
+        subconscious.touch()                          # speaking counts as activity (delays wandering)
 
-        message_count += 2
-        if (message_count >= CONSOLIDATE_EVERY_MESSAGES
-                or time.time() - last_consolidation >= CONSOLIDATE_EVERY_SECONDS):
-            run_consolidation()
-            message_count = 0
-            last_consolidation = time.time()
+    if is_daydream:
+        return
+    # consolidation bookkeeping (a reply-to-someone is an exchange; a chime-in one line)
+    message_count += 2 if user_text is not None else 1
+    if (message_count >= CONSOLIDATE_EVERY_MESSAGES
+            or time.time() - last_consolidation >= CONSOLIDATE_EVERY_SECONDS):
+        run_consolidation()
+        message_count = 0
+        last_consolidation = time.time()
+
+
+def handle_message(event, interrupting=False):
+    now = time.time()
+
+    # She follows the whole room: every message updates short-term context,
+    # whether or not she ends up replying to it. (The subconscious reads this.)
+    context = receive(event.text)
+
+    chan_key = getattr(event.raw, "id", None)
+    chan_key = str(chan_key) if chan_key is not None else event.channel
+
+    # silence tracking: gap since the previous message, then mark this one.
+    # On the first message after a restart, bridge from the persisted
+    # last-active time so she knows how long she was away.
+    prev_seen = _last_seen.get(chan_key)
+    if prev_seen is None and _startup_last_active is not None:
+        prev_seen = _startup_last_active
+    _last_seen[chan_key] = now
+    hypothalamus.touch(now)               # persist "last talked to" across restarts
+
+    feel(event.text)                      # amygdala updates mood
+    cerebellum.set_mood(amygdala.mood)    # her face follows the mood
+    subconscious.touch(now)               # any input resets the mind-wandering timer
+
+    # Is she being directly addressed? (name / @ / reply / DM)
+    addressed = False
+    if not interrupting:
+        decision = should_respond(
+            event.text,
+            mentioned=getattr(event, "mentioned", False),
+            reply_to_her=getattr(event, "reply_to_her", False),
+            channel=chan_key,
+        )
+        addressed = decision.respond and decision.reason == "addressed"
+
+    if interrupting or addressed:
+        # Directly addressed -> she answers now. While the person was talking, her
+        # subconscious was already drafting a reply against the live transcript; if
+        # that draft still fits what they actually said, speak it straight away
+        # (no transcribe-then-think gap). Otherwise think fresh as a fallback.
+        reply = None
+        if addressed and not interrupting:
+            reply = subconscious.take_draft(event.text)
+        else:
+            subconscious.end_listening()   # interrupt: don't reuse the draft
+
+        if not reply:
+            memories = recall(event.text)
+            if previous_session:
+                memories = [f"From our last session: {previous_session}"] + memories
+            flavor = color() + (INTERRUPT_NOTE if interrupting else "")
+            situation = describe_situation(event, prev_seen, now)
+            reply = think(context, flavor, memories, situation=situation,
+                          inner_thoughts=subconscious.recent_thoughts(event.text))
+
+        speak_reply(reply, user_text=event.text, channel=chan_key,
+                    interrupting=interrupting, speaker=event.speaker)
+    else:
+        # Not addressed -> hand it to the subconscious to mull over in the
+        # background. It decides on its own whether/what/when to chime in.
+        subconscious.end_listening()       # stop drafting; this wasn't for her to answer now
+        if LOG_HEARD:
+            print(f"[heard] {event.speaker}: {event.text}")
+        subconscious.heard(now, channel=chan_key)
 
 
 def on_event(ev):
@@ -204,6 +258,9 @@ def on_event(ev):
             text = "..." + text[-(avail - 3):]      # keep the tail (newest words)
         line = prefix + text
         print("\r" + line + " " * max(0, cols - len(line) - 1), end="", flush=True)
+        # She listens AND drafts at the same time: each partial refines a reply that
+        # will be ready the instant the speaker stops.
+        subconscious.observe_partial(ev.text or "", channel=ev.channel)
     elif ev.kind == INTERRUPT:
         handle_message(ev, interrupting=True)
     else:  # FINAL
@@ -219,7 +276,9 @@ try:
     # Bring up the avatar (body). Non-fatal: if it can't start, the brain/voice
     # still run headless.
     try:
-        motor_cortex.start(open_browser=True)
+        # Open a browser only for local desktop use; on a server (Discord mode)
+        # there's no display — capture the avatar by opening the exposed port.
+        motor_cortex.start(open_browser=not args.discord)
         brocas_area.set_lip_callback(cerebellum.lip)   # TTS speech energy -> mouth
     except Exception as e:
         print(f"[avatar not available: {e}]\n")
@@ -227,9 +286,14 @@ try:
     adapter.start(on_event)
     adapter.warmup()    # heat up TTS so her first real reply is fast
 
+    # Bring her subconscious online: it listens to everything she overhears and
+    # decides on its own when to chime in, and lets her mind wander when it's quiet.
+    subconscious.start(speak=speak_reply, session_recap=previous_session)
+
     while True:
         typed = input().strip()
         if typed.lower() in ("quit", "exit"):
+            subconscious.stop()                       # quiet her mind first
             adapter.stop()
             run_consolidation()                       # flush atomic facts
             try:

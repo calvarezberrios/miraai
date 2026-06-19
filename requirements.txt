@@ -12,7 +12,18 @@
 #                   No GPT-SoVITS server needed; just keep the install present.
 #
 # TTS model files (not in git, download once):
+#   - kokoro: hexgrad/Kokoro-82M weights + the "af_jessica" voice are auto-downloaded
+#             from Hugging Face on first run (cached under the HF hub cache). Nothing to place.
 #   - piper voice: already at piper_voices\en\en_US\hfc_female\medium\  (downloaded via HF hub)
+#
+# Kokoro (default TTS engine, MIRA_TTS=kokoro) does NOT install into this venv: it pins
+# numpy and pulls misaki[en]->spacy, which have no Python 3.14 wheels. It runs in a dedicated
+# Python 3.10 venv as a subprocess (the same pattern as RVC). One-time setup:
+#     py -3.10 -m venv .venv-kokoro
+#     .\.venv-kokoro\Scripts\python.exe -m pip install kokoro soundfile
+#     .\.venv-kokoro\Scripts\python.exe -m spacy download en_core_web_sm  # misaki en g2p model
+#   espeak-ng is bundled by the espeakng-loader dep — no system install needed.
+#   brocas_area launches kokoro_tts\kokoro_infer.py under that venv automatically.
 #   - RVC model:   mira.pth + mira.index in rvc_models\ (current: Yui from HF SmlCoke/rvc-yui)
 #   - HuBERT/RMVPE base models: rvc_python auto-downloads these to its own base_models\ on first run
 #
@@ -26,7 +37,12 @@ sounddevice            # microphone capture + speaker playback (local mode)
 soundfile              # WAV decode / encode
 numpy                  # audio buffers / math
 
-# --- TTS (Piper + optional RVC) ---
+# --- TTS (Kokoro, default) ---
+# kokoro is the default engine (MIRA_TTS=kokoro) but is NOT a dep of THIS venv — it can't
+# install on Python 3.14. It lives in the separate .venv-kokoro (Python 3.10); see the note
+# above. Mira's voice is "af_jessica" by default.
+
+# --- TTS (Piper + optional RVC) — alternate engine (MIRA_TTS=piper) ---
 piper-tts              # neural TTS (female voice); runs inline in the main process.
                        # RVC voice-conversion (optional) runs in the GPT-SoVITS runtime via
                        # rvc_python — see the GPT-SoVITS note above; nothing to add here.

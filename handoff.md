@@ -6,6 +6,43 @@ human brain reference + build plan docs) to get back up to speed.
 
 ---
 
+## Recent changes — 2026-06-18 (READ FIRST; supersedes stale bits below)
+
+- **Fine-tuned chat model.** Mira's conversational model was fine-tuned on the
+  `Cynaptics/persona-chat` dataset (QLoRA on **Qwen2.5-3B-Instruct**, trained free on
+  Kaggle/Colab — the 6 GB GTX 1660 can't train it). Result is registered in Ollama as
+  **`mira`**. Pipeline + notebooks live in **`finetune/`** (`mira_finetune_colab.ipynb`,
+  `mira_finetune_kaggle.ipynb`, `prepare_data.py`, `README.md`). **GGUF gotcha:** Ollama's
+  *safetensors* importer outputs gibberish (`@@@@`) for this model — always import the
+  `.gguf` (Unsloth writes it to a `*_gguf/` sibling folder), or convert the safetensors
+  with llama.cpp's `convert_hf_to_gguf.py`. Never let Ollama convert safetensors directly.
+- **Config now comes from `.env`.** New **`env_loader.py`** is called at the top of
+  `main.py` (before the brain imports, since `prefrontal_cortex` reads `MIRA_MODEL` at
+  import time) and loads `.env` into `os.environ`. Any `MIRA_*`/config var can live in
+  `.env`; a real system env var still overrides it. `.env` now holds `MIRA_MODEL=mira`
+  and `DISCORD_BOT_TOKEN=...` (renamed from `DISCORD_TOKEN` so the Discord adapter reads it).
+- **Prompt simplified — GROUNDING and STYLE blocks REMOVED.** `prefrontal_cortex.py` no
+  longer stacks persona + grounding + style. It's now ONE rewritten `PERSONA` string in a
+  deadpan, chaotic **"Neuro-sama"-style** voice, with the key constraints folded in as
+  character (don't fabricate real events/history; no tacked-on engagement questions; no
+  asterisks / `Mira:` name labels). `_build_system()` = `PERSONA` + live context
+  (situation/mood/daydreams/memories) only. ⚠ This removed the old hard anti-confabulation
+  guardrail — watch for invention and tighten the persona's "don't make things up" line if
+  it creeps back. **Any text below describing separate GROUNDING/STYLE blocks is STALE.**
+- **Subconscious wander fix.** `wander()` was emitting greetings/dialogue ("Hey, how are
+  you?") because it reused the reply-oriented prompt with no user turn; it now uses a
+  dedicated inner-monologue prompt (persona only + anti-greeting framing + examples).
+  Private wandering thoughts no longer print to console unless `MIRA_SUB_DEBUG=1`
+  (`LOG_THOUGHTS = DEBUG` in `posterior_cingulate_cortex.py`).
+- **Python 3.14 / protobuf.** The venv runs Python 3.14; protobuf must be **≥5** (4.x
+  crashes chromadb/opentelemetry import with "Metaclasses with custom tp_new are not
+  supported"). Currently 6.x. Don't let a stray `pip install` pull protobuf below 5.
+- **TTS (verify):** runtime now logs `TTS engine: kokoro` — the `MIRA_TTS` default in
+  `brocas_area.py` is **`kokoro`** (separate `.venv-kokoro`), NOT the Piper/RVC described in
+  the TTS section below. That section is likely stale; confirm before relying on it.
+
+---
+
 ## Project overview
 Building an AI VTuber named **Mira**, architected around the human brain. Each brain
 region maps to a software module. Working through a phased build plan.
@@ -253,8 +290,50 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 - **`consider_speaking(...)`** — the autonomous floor decision for chatter she was NOT
   addressed in. ONE model call both decides AND writes: returns her line, or `[QUIET]` →
   stay silent. Biased toward joining in. This replaced the old rigid two-gate (should_respond
-  "consider" + judge_relevance), which made her ignore too much.
+  "consider" + judge_relevance), which made her ignore too much. **Now driven by the
+  subconscious** (cingulate cortex), not inline in main.py.
+- **`wander(mode, ...)`** — [NEW] generates one brief inner thought (a daydream): `"memory"`
+  (reminisce on a real memory) or `"curiosity"` (wonder about the unexperienced). Used by the
+  subconscious when her mind is idle.
+- `think(...)` / `consider_speaking(...)` now accept `inner_thoughts=` so her recent daydreams
+  quietly color what she says.
 - `_build_system(...)` — shared prompt assembly for both paths.
+
+### cingulate_cortex/posterior_cingulate_cortex.py — [NEW] subconscious (default mode network)
+- Always-on; two background threads. Three jobs:
+  1. **Listening & drafting** — `observe_partial(text, channel)` is fed every live partial
+     transcript from `on_event`. A dedicated drafter thread waits for the partial to *settle*
+     (a phrase/sentence pause or the end-silence — so it doesn't burn a slow generation on every
+     growing fragment) then drafts a full reply against the latest text + related memories. When
+     the person stops, main calls **`take_draft(final)`**: if a draft fits what they actually
+     said (partials are a growing prefix; the final == the last partial, so exact/prefix match is
+     the common case) it's spoken immediately — no transcribe-then-think gap. Otherwise main
+     falls back to `think()`. `end_listening()` drops the draft (interrupts / un-addressed).
+  2. **Listening & deciding** — overheard (un-addressed) talk is handed via `heard(channel=...)`;
+     it mulls for a beat then runs `consider_speaking` and decides whether/what/when to chime in.
+  3. **Wandering** — when it's quiet (`WANDER_AFTER`) and no one is speaking, her mind drifts via
+     `wander()`. Every thought is written to her private **subconscious_log** (NEVER the chat
+     log); recent/related ones color later replies via `recent_thoughts(focus)`. A thought is
+     voiced aloud only occasionally and **never while someone is speaking**.
+- API: `start(speak, session_recap)`, `stop()`, `touch()`, `observe_partial()`, `take_draft()`,
+  `end_listening()`, `heard()`, `recent_thoughts()`. Speaks only through main's serialized
+  `speak_reply` (never overlaps a foreground turn).
+- Latency note: drafting only beats `think()` if generation is faster than the speech+silence
+  window. On a small GPU, model **swaps** dominate — keep one model warm. Best results with a
+  single fast model everywhere (`MIRA_MODEL=qwen2.5:3b`); `MIRA_DRAFT_MODEL` can set a separate
+  draft model but mixing models causes VRAM swaps that can make the first draft slow.
+- Tunables: `MIRA_WANDER_*`, `MIRA_SUB_*`, `MIRA_DRAFT_MODEL`, `MIRA_MIN_DRAFT_WORDS`,
+  `MIRA_DRAFT_SETTLE`, `MIRA_DRAFT_MAX_WAIT`, `MIRA_LISTEN_TIMEOUT`; `MIRA_SUB_DEBUG=1` traces it.
+
+### cingulate_cortex/subconscious_log.py — [NEW] private stream of consciousness
+- Persistent JSONL at `memory_store/subconscious_log.jsonl`. Her wandering thoughts live here,
+  kept **separate from episodic memory** (a daydream is not a fact, so it can't leak into grounded
+  recall). `record(text, mode)`, `recent(n)`, `related(query, n)` (instant keyword overlap, no
+  model call), `review(n)`.
+
+### thalamus.py — working memory + sequencing
+- Added a `_seq` counter, `snapshot()` (consistent context+seq copy) and `awaiting_reply()`
+  so the subconscious can cheaply tell what's new and whether the tail is an unanswered message.
 
 ### action_selector.py (basal ganglia)
 - `should_respond(text, *, mentioned, reply_to_her, channel, now)` → Decision. Now used by
@@ -264,7 +343,8 @@ Every package dir has `__init__.py`. Brain core is I/O-agnostic; the PNS adapter
 ### hypothalamus.py — [NEW] persistent clock
 - Persists `last_active` to `memory_store/clock.json`. `touch()`, `last_active()`,
   `time_since_last_active()`. Read at startup so Mira knows the downtime gap (used in the
-  situation note). No background processing yet (true scheduler is Phase 7).
+  situation note). (The subconscious in the cingulate cortex now does run a background
+  thread; the hypothalamus itself is still just the persistent clock.)
 
 ### wernickes_area.py — STT
 - Local continuous-listening behavior unchanged. Added a public **`transcribe(f32_16k_mono)`**

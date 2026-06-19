@@ -1,16 +1,23 @@
 """
 brocas_area.py — speech production (TTS) for Mira.
 
-Pipeline: text → Piper TTS (fast neural TTS) → WAV → RVC voice conversion → playback.
+Anatomy: Broca's area (frontal lobe) = assembling words into produced speech.
 
-Piper produces clean English-female speech quickly; RVC then converts the timbre
-to Mira's trained voice using the .pth / .index model files.
+THREE engines, chosen at startup by the MIRA_TTS env var:
+  - "kokoro"    (default): Kokoro-82M neural TTS (hexgrad/Kokoro-82M). Runs inline
+                in this process (PyTorch), no subprocess, no RVC. Mira's voice is
+                the "Jessica" voice (af_jessica) by default. Natural, light, fast.
+  - "piper"              : Piper TTS -> optional RVC voice conversion. Fast and
+                light; an older local-Windows path. RVC runs as a subprocess under
+                a Python that has fairseq/faiss/torch (the GPT-SoVITS runtime).
+  - "gptsovits"          : sends text to a locally-running GPT-SoVITS api_v2
+                server and plays the returned audio. Heavier/higher quality; the
+                RunPod path (set MIRA_TTS=gptsovits there).
 
-RVC inference runs as a subprocess under the GPT-SoVITS bundled runtime Python,
-which has fairseq + faiss + torch+cuda (unlike the main venv on Python 3.14).
-
-Same two-stage synth/playback pipeline as before: sentence N plays while
-sentence N+1 is still being synthesized.
+Everything around the engine is shared: text cleaning, sentence splitting, the
+two-stage synth/playback pipeline (sentence N plays while N+1 synthesizes), the
+Phase-5 avatar lip-sync (amplitude envelope -> mouth), and the public API. Only
+_synthesize() and warmup() branch on the engine.
 """
 
 import atexit
@@ -22,46 +29,119 @@ import subprocess
 import tempfile
 import threading
 import time
+import wave
 from typing import Callable, Optional
 
 import numpy as np
+import requests
 import sounddevice as sd
 import soundfile as sf
 
 # ---------------------------------------------------------------------------
-# Config — edit these paths to match your setup
+# Engine select
 # ---------------------------------------------------------------------------
-
-# Piper voice model (English female, converted to Mira's voice by RVC)
-PIPER_MODEL = r"D:\aiproject\piper_voices\en\en_US\hfc_female\medium\en_US-hfc_female-medium.onnx"
-
-# Master switch: when False, Mira speaks with the raw Piper female voice and RVC
-# is skipped entirely (no subprocess launched). Flip to True to re-enable the
-# RVC voice conversion once you have a model whose output sounds clean.
-USE_RVC = True
-
-# RVC model files — drop your .pth and .index here
-RVC_MODEL  = r"D:\aiproject\rvc_models\mira.pth"
-RVC_INDEX  = r"D:\aiproject\rvc_models\mira.index"   # set "" to skip
-
-# Python runtime that has fairseq + faiss + torch (GPT-SoVITS bundled runtime)
-RVC_PYTHON = r"D:\GPT-SoVITS-v3lora-20250228\runtime\python.exe"
-
-# Path to our RVC inference script
-RVC_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
-                           "..", "rvc", "rvc_infer.py")
-RVC_SCRIPT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                             r"..\..\..\..\rvc\rvc_infer.py"))
-
-# Pitch shift in semitones (0 = no change; positive = higher)
-PITCH_SHIFT = 0
-
-# How much of the .index retrieval to blend in (0.0–1.0); 0 = pure model, no index.
-# 0.5 is a clean default — high values (0.8–1.0) add timbre accuracy but can warble.
-INDEX_RATE = 0.5
+# "kokoro" (default, local), "piper" (local) or "gptsovits" (RunPod). Set MIRA_TTS to switch.
+ENGINE = os.environ.get("MIRA_TTS", "kokoro").strip().lower()
+if ENGINE not in ("kokoro", "piper", "gptsovits"):
+    print(f"[brocas_area] unknown MIRA_TTS={ENGINE!r}; falling back to 'kokoro'")
+    ENGINE = "kokoro"
 
 # ---------------------------------------------------------------------------
-# Speech text cleaning (same as before)
+# Config — Kokoro (used when ENGINE == "kokoro")
+# ---------------------------------------------------------------------------
+# Kokoro pins numpy==1.26.4 and pulls misaki[en]->spacy, none of which have
+# Python 3.14 wheels, so it can't run in this (3.14) process. It runs in a
+# dedicated Python 3.10 venv as a persistent subprocess — the same pattern as RVC.
+
+# Kokoro-82M voice. "af_jessica" is the American-English female "Jessica" voice.
+KOKORO_VOICE = os.environ.get("MIRA_KOKORO_VOICE", "af_jessica")
+# Language pack for the g2p pipeline. 'a' = American English (matches af_* voices).
+KOKORO_LANG = os.environ.get("MIRA_KOKORO_LANG", "a")
+KOKORO_REPO = os.environ.get("MIRA_KOKORO_REPO", "hexgrad/Kokoro-82M")
+KOKORO_SPEED = os.environ.get("MIRA_KOKORO_SPEED", "1.0")
+
+# Python runtime that has kokoro installed (the dedicated 3.10 venv).
+KOKORO_PYTHON = os.environ.get(
+    "MIRA_KOKORO_PYTHON",
+    os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        r"..\..\..\..\.venv-kokoro\Scripts\python.exe",
+    )),
+)
+
+# Path to our Kokoro inference script (repo-relative).
+KOKORO_SCRIPT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), r"..\..\..\..\kokoro_tts\kokoro_infer.py"
+))
+
+# ---------------------------------------------------------------------------
+# Config — Piper + RVC (used when ENGINE == "piper")
+# ---------------------------------------------------------------------------
+
+# Piper voice model (English female, converted to Mira's voice by RVC).
+PIPER_MODEL = os.environ.get(
+    "MIRA_PIPER_MODEL",
+    r"D:\aiproject\piper_voices\en\en_US\hfc_female\medium\en_US-hfc_female-medium.onnx",
+)
+
+# Master switch for the RVC stage. When False, Mira speaks with the raw Piper
+# female voice and no RVC subprocess is launched.
+USE_RVC = os.environ.get("USE_RVC", "1").strip().lower() not in ("0", "false", "no", "")
+
+# RVC model files — drop your .pth and .index here.
+RVC_MODEL = os.environ.get("MIRA_RVC_MODEL", r"D:\aiproject\rvc_models\mira.pth")
+RVC_INDEX = os.environ.get("MIRA_RVC_INDEX", r"D:\aiproject\rvc_models\mira.index")  # "" to skip
+
+# Python runtime that has fairseq + faiss + torch (GPT-SoVITS bundled runtime).
+RVC_PYTHON = os.environ.get(
+    "MIRA_RVC_PYTHON", r"D:\GPT-SoVITS-v3lora-20250228\runtime\python.exe"
+)
+
+# Path to our RVC inference script (repo-relative).
+RVC_SCRIPT = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), r"..\..\..\..\rvc\rvc_infer.py")
+)
+
+PITCH_SHIFT = int(os.environ.get("MIRA_PITCH_SHIFT", "0"))      # semitones (0 = no change)
+INDEX_RATE = float(os.environ.get("MIRA_INDEX_RATE", "0.5"))    # .index blend 0.0–1.0
+
+# ---------------------------------------------------------------------------
+# Config — GPT-SoVITS (used when ENGINE == "gptsovits")
+# ---------------------------------------------------------------------------
+API_URL = os.environ.get("GPTSOVITS_URL", "http://127.0.0.1:9880/tts")
+
+# Reference clip the GPT-SoVITS server clones from (zero-shot). Read by the
+# SERVER process, so the path must be valid where that server runs (same box).
+_DEFAULT_REF = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice", "sample_clip.mp3")
+)
+VOICE = {
+    "ref_audio_path": os.environ.get("MIRA_REF_AUDIO", _DEFAULT_REF),
+    "prompt_text": os.environ.get(
+        "MIRA_REF_TEXT",
+        "You want to know all about me, huh? Well, let's just say I'm a bit of a handful.",
+    ),
+    "prompt_lang": os.environ.get("MIRA_REF_LANG", "en"),
+    "text_lang": os.environ.get("MIRA_TEXT_LANG", "en"),
+}
+PARAMS = {
+    "text_split_method": "cut5",
+    "batch_size": 1,
+    "media_type": "wav",
+    "streaming_mode": False,
+    "top_k": 15,
+    "top_p": 1.0,
+    "temperature": 1.0,
+    "parallel_infer": False,
+    "split_bucket": False,
+    "speed_factor": 1.12,
+}
+SYNTH_TIMEOUT = float(os.environ.get("GPTSOVITS_TIMEOUT", "60"))
+
+print(f"[brocas_area] TTS engine: {ENGINE}")
+
+# ---------------------------------------------------------------------------
+# Speech text cleaning (shared)
 # ---------------------------------------------------------------------------
 
 SPOKEN_ACTIONS = {
@@ -98,6 +178,7 @@ def _replace_action(match):
 
 
 def _clean_for_speech(text):
+    # type: (str) -> str
     text = _ACTION_SPAN_RE.sub(_replace_action, text)
     text = _EMOJI_RE.sub("", text)
     text = re.sub(r"(?<=\w)-(?=\w)", "", text)
@@ -109,27 +190,98 @@ def _clean_for_speech(text):
 
 
 def _split_sentences(text):
+    # type: (str) -> list
     parts = [m.group().strip() for m in _SENTENCE_RE.finditer(text)]
     return [p for p in parts if p]
 
 
 # ---------------------------------------------------------------------------
-# Piper synthesis
+# Engine: Kokoro synthesis (a persistent subprocess keeps the model hot)
 # ---------------------------------------------------------------------------
 
-def _piper_synthesize(text, out_path):
-    # type: (str, str) -> bool
-    """Run Piper TTS and write WAV to out_path. Returns True on success."""
-    import wave
-    try:
-        _ensure_piper_loaded()
-        with wave.open(out_path, "wb") as wav_file:
-            _piper_voice.synthesize_wav(text, wav_file)
-        return True
-    except Exception as e:
-        print("[brocas_area] piper error:", e)
-        return False
+_kokoro_proc = None
+_kokoro_lock = threading.Lock()
 
+
+def _start_kokoro_server():
+    # type: () -> Optional[subprocess.Popen]
+    if not os.path.isfile(KOKORO_PYTHON):
+        print(f"[brocas_area] kokoro python not found: {KOKORO_PYTHON}")
+        return None
+    cmd = [KOKORO_PYTHON, KOKORO_SCRIPT, "--serve",
+           "--voice", KOKORO_VOICE, "--lang", KOKORO_LANG,
+           "--repo", KOKORO_REPO, "--speed", str(KOKORO_SPEED)]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=None, text=True, bufsize=1)
+    except Exception as e:
+        print("[brocas_area] failed to launch Kokoro server:", e)
+        return None
+    for line in proc.stdout:
+        if line.strip() == "READY":
+            print("[brocas_area] Kokoro server ready")
+            return proc
+        if proc.poll() is not None:
+            break
+    print("[brocas_area] Kokoro server exited before becoming ready")
+    return None
+
+
+def _ensure_kokoro_server():
+    # type: () -> Optional[subprocess.Popen]
+    global _kokoro_proc
+    if _kokoro_proc is not None and _kokoro_proc.poll() is None:
+        return _kokoro_proc
+    with _kokoro_lock:
+        if _kokoro_proc is not None and _kokoro_proc.poll() is None:
+            return _kokoro_proc
+        _kokoro_proc = _start_kokoro_server()
+        return _kokoro_proc
+
+
+@atexit.register
+def _shutdown_kokoro_server():
+    if _kokoro_proc is not None and _kokoro_proc.poll() is None:
+        try:
+            _kokoro_proc.stdin.write("QUIT\n")
+            _kokoro_proc.stdin.flush()
+            _kokoro_proc.wait(timeout=3)
+        except Exception:
+            _kokoro_proc.kill()
+
+
+def _synth_kokoro(text):
+    # type: (str) -> Optional[bytes]
+    """Kokoro TTS (subprocess) -> WAV bytes (24 kHz mono). None on failure."""
+    proc = _ensure_kokoro_server()
+    if proc is None:
+        return None
+    with tempfile.NamedTemporaryFile(suffix="_kokoro.wav", delete=False) as tf:
+        out_path = tf.name
+    try:
+        with _kokoro_lock:
+            # text is a single cleaned sentence (no newlines); path has no '|'.
+            proc.stdin.write("%s|%s\n" % (out_path, text.replace("\n", " ")))
+            proc.stdin.flush()
+            reply = proc.stdout.readline().strip()
+        if reply != "OK":
+            print("[brocas_area] kokoro:", reply)
+            return None
+        with open(out_path, "rb") as f:
+            return f.read()
+    except Exception as e:
+        print("[brocas_area] kokoro server error:", e)
+        return None
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Engine: Piper synthesis
+# ---------------------------------------------------------------------------
 
 _piper_voice = None
 _piper_lock = threading.Lock()
@@ -147,38 +299,41 @@ def _ensure_piper_loaded():
         print("[brocas_area] Piper voice loaded:", PIPER_MODEL)
 
 
+def _piper_synthesize(text, out_path):
+    # type: (str, str) -> bool
+    """Run Piper TTS and write WAV to out_path. Returns True on success."""
+    try:
+        _ensure_piper_loaded()
+        with wave.open(out_path, "wb") as wav_file:
+            _piper_voice.synthesize_wav(text, wav_file)
+        return True
+    except Exception as e:
+        print("[brocas_area] piper error:", e)
+        return False
+
+
 # ---------------------------------------------------------------------------
-# RVC voice conversion
+# Engine: RVC voice conversion (a persistent subprocess keeps the model hot)
 # ---------------------------------------------------------------------------
 
-# A single long-lived RVC subprocess keeps HuBERT + the model + faiss hot, so
-# each conversion is just inference (~0.5-1s) instead of a ~10s cold reload.
 _rvc_proc = None
 _rvc_lock = threading.Lock()
 
 
 def _start_rvc_server():
     # type: () -> Optional[subprocess.Popen]
-    """Launch the persistent RVC server and wait until its models are loaded."""
     if not os.path.isfile(RVC_MODEL):
         return None
-    cmd = [
-        RVC_PYTHON, RVC_SCRIPT,
-        "--serve",
-        "--model",      RVC_MODEL,
-        "--index_rate", str(INDEX_RATE),
-    ]
+    cmd = [RVC_PYTHON, RVC_SCRIPT, "--serve", "--model", RVC_MODEL,
+           "--index_rate", str(INDEX_RATE)]
     if RVC_INDEX and os.path.isfile(RVC_INDEX):
         cmd += ["--index", RVC_INDEX]
     try:
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=None, text=True, bufsize=1,
-        )
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=None, text=True, bufsize=1)
     except Exception as e:
         print("[brocas_area] failed to launch RVC server:", e)
         return None
-    # block until the server prints READY (models hot)
     for line in proc.stdout:
         if line.strip() == "READY":
             print("[brocas_area] RVC server ready")
@@ -214,7 +369,6 @@ def _shutdown_rvc_server():
 
 def _rvc_convert(input_wav, output_wav):
     # type: (str, str) -> bool
-    """Send one conversion request to the persistent RVC server. Serialized."""
     proc = _ensure_rvc_server()
     if proc is None:
         return False
@@ -232,33 +386,23 @@ def _rvc_convert(input_wav, output_wav):
             return False
 
 
-# ---------------------------------------------------------------------------
-# Full pipeline: text → Piper → RVC → bytes
-# ---------------------------------------------------------------------------
-
-def _synthesize(text):
+def _synth_piper(text):
     # type: (str) -> Optional[bytes]
-    """Return synthesized (and optionally RVC-converted) audio as WAV bytes."""
+    """Piper -> (optional) RVC -> WAV bytes."""
     with tempfile.NamedTemporaryFile(suffix="_piper.wav", delete=False) as tf_in:
         piper_path = tf_in.name
     with tempfile.NamedTemporaryFile(suffix="_rvc.wav", delete=False) as tf_out:
         rvc_path = tf_out.name
-
     try:
         if not _piper_synthesize(text, piper_path):
             return None
-
-        # RVC disabled, or model missing → use the Piper female voice directly.
         if not USE_RVC or not os.path.isfile(RVC_MODEL):
             with open(piper_path, "rb") as f:
                 return f.read()
-
         if not _rvc_convert(piper_path, rvc_path):
-            # Fallback: use Piper audio without RVC
             print("[brocas_area] RVC failed, falling back to Piper audio")
             with open(piper_path, "rb") as f:
                 return f.read()
-
         with open(rvc_path, "rb") as f:
             return f.read()
     finally:
@@ -270,12 +414,44 @@ def _synthesize(text):
 
 
 # ---------------------------------------------------------------------------
+# Engine: GPT-SoVITS synthesis
+# ---------------------------------------------------------------------------
+
+def _synth_gptsovits(text):
+    # type: (str) -> Optional[bytes]
+    """Synthesize one chunk via the GPT-SoVITS api_v2 server. Returns WAV bytes."""
+    payload = {
+        "text": text,
+        "text_lang": VOICE["text_lang"],
+        "ref_audio_path": VOICE["ref_audio_path"],
+        "prompt_text": VOICE["prompt_text"],
+        "prompt_lang": VOICE["prompt_lang"],
+    }
+    payload.update(PARAMS)
+    try:
+        r = requests.post(API_URL, json=payload, timeout=SYNTH_TIMEOUT)
+    except requests.RequestException as e:
+        print("[brocas_area] request failed:", e)
+        return None
+    if r.status_code != 200 or not r.headers.get("Content-Type", "").startswith("audio"):
+        print("[brocas_area] synth failed (%s): %s" % (r.status_code, r.text[:200]))
+        return None
+    return r.content
+
+
+def _synthesize(text):
+    # type: (str) -> Optional[bytes]
+    """Dispatch to the active engine. Returns WAV bytes (optionally converted)."""
+    if ENGINE == "kokoro":
+        return _synth_kokoro(text)
+    if ENGINE == "gptsovits":
+        return _synth_gptsovits(text)
+    return _synth_piper(text)
+
+
+# ---------------------------------------------------------------------------
 # Lip-sync — amplitude envelope streamed to the avatar's mouth during playback
 # ---------------------------------------------------------------------------
-# brocas computes a per-frame speech-energy level (0..1) from the WAV and pushes
-# it to a callback timed to playback. main.py wires the callback to the
-# cerebellum (which smooths it and drives motor_cortex.lipsync). If nothing is
-# wired, this is all inert — synthesis/playback are unaffected.
 
 _lip_cb = None                  # type: Optional[Callable[[float], None]]
 _LIP_HOP = 0.03                 # seconds per envelope frame (~33 Hz)
@@ -290,7 +466,6 @@ def set_lip_callback(cb):
 
 def _rms_envelope(data, sr):
     # type: (np.ndarray, int) -> list
-    """Per-frame normalized RMS (0..1) of the audio, one value per _LIP_HOP."""
     if data.ndim > 1:
         data = data.mean(axis=1)
     hop = max(1, int(sr * _LIP_HOP))
@@ -304,14 +479,11 @@ def _rms_envelope(data, sr):
     peak = max(levels) if levels else 0.0
     if peak <= 1e-6:
         return [0.0 for _ in levels]
-    # normalize to the loudest frame, then a little gain so normal speech opens
-    # the mouth well; clamp keeps shouts from pinning it wide.
     return [min(1.0, (l / peak) * 1.3) for l in levels]
 
 
 def _start_lip_thread(data, sr):
     # type: (np.ndarray, int) -> Optional[threading.Event]
-    """Walk the envelope in real time, feeding _lip_cb, in step with playback."""
     if _lip_cb is None:
         return None
     levels = _rms_envelope(data, sr)
@@ -332,7 +504,7 @@ def _start_lip_thread(data, sr):
             if ahead > 0:
                 time.sleep(ahead)
         try:
-            _lip_cb(0.0)            # mouth closed when the clip ends
+            _lip_cb(0.0)
         except Exception:
             pass
 
@@ -342,8 +514,7 @@ def _start_lip_thread(data, sr):
 
 def lip_drive_bytes(wav_bytes):
     # type: (bytes) -> Optional[threading.Event]
-    """Start lip-sync from raw WAV bytes (used by the Discord voice path, which
-    plays through ffmpeg rather than _play). Returns a stop Event, or None."""
+    """Start lip-sync from raw WAV bytes (Discord voice path plays via ffmpeg)."""
     if _lip_cb is None:
         return None
     try:
@@ -354,13 +525,13 @@ def lip_drive_bytes(wav_bytes):
 
 
 # ---------------------------------------------------------------------------
-# Playback
+# Playback (local mic/speaker mode only; Discord plays via ffmpeg into the VC)
 # ---------------------------------------------------------------------------
 
 def _play(wav_bytes):
     # type: (bytes) -> None
     data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
-    stop = _start_lip_thread(data, sr)      # mouth moves in sync with the audio
+    stop = _start_lip_thread(data, sr)
     sd.play(data, sr)
     sd.wait()
     if stop is not None:
@@ -368,7 +539,7 @@ def _play(wav_bytes):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline queues (motor sequencing — same design as before)
+# Pipeline queues (motor sequencing)
 # ---------------------------------------------------------------------------
 
 _synth_q = queue.Queue()
@@ -420,7 +591,14 @@ def say(text):
 
 
 def warmup():
-    """Pre-load Piper voice (and the RVC server if enabled) so reply 1 is fast."""
+    """Heat the active engine so the first real reply is fast."""
+    if ENGINE == "kokoro":
+        threading.Thread(target=_ensure_kokoro_server, daemon=True).start()
+        return
+    if ENGINE == "gptsovits":
+        _synth_q.put(("Warming up.", False))   # one throwaway synth warms the server
+        return
+    # piper: preload the voice (and the RVC server if enabled)
     threading.Thread(target=_ensure_piper_loaded, daemon=True).start()
     if USE_RVC:
         threading.Thread(target=_ensure_rvc_server, daemon=True).start()
@@ -433,5 +611,5 @@ def wait_until_done():
 
 
 if __name__ == "__main__":
-    say("Hey there. If you can hear this, Piper and RVC are working correctly.")
+    say(f"Hey there. If you can hear this, the {ENGINE} voice is working correctly.")
     wait_until_done()

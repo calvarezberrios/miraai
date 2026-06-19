@@ -44,9 +44,11 @@ BLOCK_SEC = 0.05            # mic callback chunk size
 REFRESH_SEC = 0.7           # how often live partials update
 END_SILENCE_SEC = 3.0       # trailing silence that ends an utterance
 INTERRUPT_AFTER_SEC = 25.0  # monologue length that lets Mira interrupt
-MODEL_SIZE = "small"        # "small" for fast partials; "medium"/"large-v3" if accent needs it
-DEVICE = "cuda"             # "cpu" if VRAM gets tight
-COMPUTE_TYPE = "int8"       # fits alongside Ollama + GPT-SoVITS
+# On a roomy GPU bump these via env: MODEL_SIZE=medium/large-v3, COMPUTE_TYPE=float16.
+# (The old 1660 Super had a broken fp16 path; int8/small were a VRAM compromise.)
+MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")   # "small" fast; "medium"/"large-v3" more accurate
+DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")            # "cpu" if VRAM gets tight
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # "float16" on a working-fp16 GPU
 INPUT_DEVICE = None         # None = default mic; or device index/name
 LANGUAGE = "en"
 

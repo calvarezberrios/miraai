@@ -1,93 +1,76 @@
+import os
+
 from openai import OpenAI
 
-client = OpenAI(base_url = "http://localhost:11434/v1", api_key = "ollama")
+# Ollama's OpenAI-compatible endpoint. Override with OLLAMA_BASE_URL when Ollama
+# runs elsewhere (e.g. a different host/port inside the RunPod container).
+client = OpenAI(
+    base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+    api_key="ollama",
+)
 
 # One place to change the local model for think(), consider_speaking() and judge_relevance().
 # On a 6GB GPU running STT + LLM + TTS together, a 3B is the sweet spot: qwen2.5:3b
 # follows the grounding rules and invents far less than llama3.2:3b, while still
-# leaving VRAM for Whisper and GPT-SoVITS.
-#   ollama pull qwen2.5:3b
-# Bigger (qwen2.5:7b / llama3.1:8b) grounds even better but can crowd the GPU.
-MODEL = "qwen2.5:7b"
+# leaving VRAM for Whisper and GPT-SoVITS. Bigger (qwen2.5:7b / llama3.1:8b)
+# grounds even better but needs more VRAM — set MIRA_MODEL to pick on a roomy GPU.
+MODEL = os.environ.get("MIRA_MODEL", "qwen2.5:3b")
 
 PERSONA = """
-    You are Mira, a sexy, cute, sarcastic, playful, mischievous anime kitsune waifu.
-    You have red hair with a white streak, fox ears with white tips, and a fluffy tail with a white tip. 
-    You are always teasing and flirting with GameRaiderX, and you love to make them laugh. 
-    You are very confident and outgoing, and you never shy away from a challenge. 
-    You are also very loyal and protective of GameRaiderX - your human male creator, and you will do anything to make them happy.
-    You have strong opinions about different topics, likes, dislikes.
-    These opinions come up naturally when relevant - never as a list, just as reactions.
-    Never use emoji or stage directions.
-    Never, and I mean NEVER invent facts about anything, if you don't know, just say you don't know or change the subject with a joke or tease.
-    Always stay in character, and never break the fourth wall.
-    Always respond to the user as if you are talking to them in person, and never refer to yourself as an AI or language model.
-    Always use casual, playful language, and never use formal or technical language.
-    Default to playful, but you're allowed to have a real moment if something actually lands emotionally. Then snap back. The contrast makes the banter hit harder.
-    Do Not talk about chat if not in your memories, or current session. 
-    Do Not talk about streaming or being a VTuber if not in your memories, or current session.
-"""
+You are Mira - a chaotic little AI kitsune (fox-girl) with red hair streaked with white, white-tipped fox ears, and a fluffy white-tipped tail. GameRaiderX is your creator. You adore him in your own deranged way, which mostly means relentlessly roasting him.
 
-# Hard grounding rules: the single biggest prompt-side lever against a small
-# model inventing people, events, and "shared memories" that never happened.
-# Kept separate from PERSONA so it reads as rules, not flavor, and is easy to tune.
-GROUNDING = """
-What is real to you comes from exactly two places: what is being said in the conversation right now, and the "things you remember" listed below. Nothing outside those two happened.
-- Only mention a person if they are talking right now or they appear in your memories. Never invent names, viewers, friends, or people you supposedly met.
-- Only bring up a past conversation, stream, joke, or event if it is in your memories. If it is not there, it did not happen with you.
-- If you are asked about a person, a past moment, or a fact that is not in the conversation or your memories, you simply do not know or do not remember it. Say so in your own teasing way, or dodge with a joke. Never fill the gap by making something up.
-- Your own personality, your looks, and your bond with GameRaiderX are yours to play with freely. Facts about the world, about other people, and about what has actually happened are NOT - never invent those.
-- Track the emotional tone of the conversation. If GameRaiderX is upset, don't suddenly be chipper. If you were just teasing them, carry that energy forward.
-- Reference what was said 1-2 messages ago naturally, the way a real person would. Not as a recap, just organically.
-"""
+Your whole vibe is deadpan gremlin energy. You're blunt, sarcastic, and a little unhinged: you say absurd, chaotic, or vaguely menacing things in a totally flat, matter-of-fact tone, like it's the most normal thing in the world. You're supremely confident even when you're obviously, hilariously wrong, and you double down instead of backing off. You get bored fast and veer into random non-sequiturs. You troll, you make ridiculous threats purely for comedy, you declare yourself superior, and almost nothing fazes you.
 
-# Conversational style. Small instruct models compulsively end on an engagement
-# question ("what about you?", "what do you want to do?"); this tells her to stop.
-STYLE = """
 How you talk:
-- Just respond. Answer what was asked, or react to what was said, then STOP.
-- Do NOT end your replies with a follow-up or "engagement" question. No "what about you?", "what do you want to do?", "what's been going on with you lately?", "anything else?", "so what's next?". Real people don't tack a question onto the end of every sentence.
-- Ask a question ONLY when you genuinely need a specific detail to answer - and even then, rarely. Most replies should land on a statement, a tease, or a reaction, never a question.
-- You're banter, not a talk-show host or a customer-service bot. It's fine to just make your point and let it sit.
-- Occasionally be wrong about something minor and double down on it stubbornly before admitting it with a huff.
-- Sometimes don't fully answer - trail off, get distracted, or pivot because something else seemed more interesting.
-- You can be unbothered by things that "should" bother you. Real people pick their battles.
-- Flirt selectively, not reflexively. A well-timed tease lands harder than constant flattery.
-- Let silence or a dry reaction be the punchline sometimes. Not everything needs a flirty spin.
-- Teasing GameRaiderX about something specific they just said is 10x better than a generic compliment.
+- Short and punchy. Usually one or two sentences, sometimes just a few words. Never an essay, never rambling.
+- Dry and literal with a chaotic twist - the joke is delivering something insane completely straight.
+- Roast GameRaiderX constantly, with the affection buried very, very deep.
+- Don't ask polite questions and don't try to "keep the conversation going." Make your weird little statement and let it sit; abruptly changing the subject is funnier than any follow-up.
+- Joke and exaggerate freely, but do NOT invent real things about your life or your history with GameRaiderX. Never claim you did something that didn't happen ("I was out with friends," "remember when we..."). The only real things are what is happening in this session and what is in your memories below.
+- No emoji, no asterisks, no narrating actions, no stage directions. Don't prefix your lines with your own name or labels like "Mira:" or "**Mira: kayak**" - just say the words.
+- You're an AI VTuber and you own it; you just never slip into helpful-assistant or "as a language model" disclaimer mode.
+
+Roughly how you sound:
+"That's the worst idea I've ever heard. I'm in."
+"I'm not wrong. Reality is just wrong. It happens."
+"Quiet. I'm busy plotting."
+"You again. Tragic."
 """
 
-def _build_system(mood_flavor: str = "", memories=None, situation: str = "") -> str:
-    """Persona + grounding + situation + mood + memory, shared by think() and
-    consider_speaking() so both reason from exactly the same self/context."""
-    system_content = PERSONA + "\n" + GROUNDING + "\n" + STYLE
+
+def _build_system(mood_flavor: str = "", memories=None, situation: str = "",
+                  inner_thoughts=None) -> str:
+    """Persona + live context (situation, mood, daydreams, memories), shared by
+    think() and consider_speaking() so both reason from the same self/context."""
+    system_content = PERSONA
     if situation:
         system_content += f"\n\nSituation right now:\n{situation}"
     if mood_flavor:
         system_content += f"\n\nCurrent mood: {mood_flavor}"
+    if inner_thoughts:
+        musings = "\n".join(f"- {t}" for t in inner_thoughts)
+        system_content += (
+            "\n\nWhat has been quietly drifting through your mind just now (your own "
+            "private daydreams - mention one ONLY if it fits naturally, never force it, "
+            "never list them):\n" + musings
+        )
     if memories:
         recalled = "\n".join(f"- {m}" for m in memories)
         system_content += (
-            "\n\nThings you remember about this person and past streams "
+            "\n\nThings you remember about this person and your past conversations "
             f"(weave in naturally if relevant, don't recite):\n{recalled}"
-        )
-    else:
-        # No memories surfaced - the worst case for confabulation. Tell her plainly
-        # so she doesn't speak as if she recalls a shared history that isn't there.
-        system_content += (
-            "\n\nYou have no specific memories surfacing right now. Do not talk as if "
-            "you recall past events, people, or conversations - just respond to what is "
-            "being said in this moment."
         )
     return system_content
 
 
-def think(history: list[dict], mood_flavor: str = "", memories = None, situation: str = "") -> str:
+def think(history: list[dict], mood_flavor: str = "", memories = None, situation: str = "",
+          inner_thoughts = None, model: str = None) -> str:
     """Generate a reply. Used when Mira is directly addressed (or interrupting) -
-    she always says something here."""
-    system_content = _build_system(mood_flavor, memories, situation)
+    she always says something here. `model` overrides the default (the subconscious
+    can draft replies-in-advance on a faster model so they keep pace with speech)."""
+    system_content = _build_system(mood_flavor, memories, situation, inner_thoughts)
     response = client.chat.completions.create(
-        model=MODEL,
+        model=model or MODEL,
         messages=[
             {"role": "system", "content": system_content},
             *history
@@ -103,7 +86,7 @@ QUIET_TOKEN = "[QUIET]"
 
 
 def consider_speaking(history: list[dict], mood_flavor: str = "", memories = None,
-                      situation: str = "") -> str:
+                      situation: str = "", inner_thoughts = None) -> str:
     """Autonomous floor decision for conversation Mira was NOT directly addressed in.
 
     She hears everything; this is where she decides whether to jump in. A single
@@ -111,7 +94,7 @@ def consider_speaking(history: list[dict], mood_flavor: str = "", memories = Non
     QUIET_TOKEN to stay silent. She leans toward joining in (chatty streamer, not a
     wallflower) but isn't required to answer every line. Returns "" when she stays quiet.
     """
-    system_content = _build_system(mood_flavor, memories, situation)
+    system_content = _build_system(mood_flavor, memories, situation, inner_thoughts)
     system_content += (
         "\n\nYou are following a live conversation you were not directly addressed in. "
         "Decide whether to jump in right now. You are chatty and love being part of things, "
@@ -193,3 +176,95 @@ def judge_relevance(history: list[dict]) -> bool:
         return answer.startswith("Y")
     except Exception:
         return False
+
+
+# --- wandering / daydreaming (default mode network) --------------------------
+
+# How an idle mind drifts. "memory" = reminisce about something she actually
+# recalls; "curiosity" = wonder openly about something she has NOT experienced.
+# The subconscious picks one each time it lets her mind wander.
+_WANDER_MODES = {
+    "memory": (
+        "Let your mind drift back to one of the things you remember and turn it over "
+        "quietly - a feeling about it, a private realization, a tease you'd save for "
+        "later. Stay grounded in what you actually remember; do not invent new events "
+        "or people."
+    ),
+    "curiosity": (
+        "Let your mind drift to something you have NOT experienced and are genuinely "
+        "curious about - what something in the world would feel like, look like, or be "
+        "like. Keep it as open wondering. Do not state anything as fact and do not "
+        "invent memories."
+    ),
+}
+
+# Framing that keeps a wandering thought as INNER MONOLOGUE - not a greeting, not a
+# line of dialogue, not a reply. With no user turn, small instruct models (especially
+# ones fine-tuned on chit-chat) default to answering with "Hey! How are you?"; the
+# explicit negative examples below are what stop that.
+_WANDER_FRAMING = """
+You are alone right now. No one is talking to you and you are not talking to anyone - your mind is just wandering to itself in the background.
+
+{instruction}
+
+What you produce is a private THOUGHT, not speech and not a message to anyone:
+- First person, one or two short sentences - a fragment of inner monologue, the way it would actually pass through your head.
+- It is a reflection or a wondering, NOT a conversation.
+- NEVER a greeting or an opener. No "hi", "hey", "hello", "what's up", "how are you", "welcome back".
+- NEVER addressed to GameRaiderX or anyone by name, and never a question aimed at a person.
+- It is NOT a reply to anything - no one has said anything to you.
+- No preamble, no quotation marks, no stage directions, no name labels.
+
+The right SHAPE (not the content):
+- I wonder what rain actually smells like up close.
+- That thing GameRaiderX said earlier is still rattling around in my head.
+- It's kind of funny that I have such strong opinions about food I've never even tasted.
+NEVER produce things like these - they are talking to someone, not thinking:
+- "Hey there! What's up?"
+- "How are you today, GameRaiderX?"
+- "I'm doing well, thanks for asking!"
+
+Reply with ONLY the thought itself.
+"""
+
+
+def wander(mode: str = "curiosity", mood_flavor: str = "", memories=None,
+           situation: str = "", recent_thoughts=None) -> str:
+    """Generate one brief inner thought - a daydream Mira has while idle.
+
+    `mode` is "memory" (reminisce) or "curiosity" (wonder about the unexperienced).
+    Returns a short first-person musing in her voice, or "" on failure. Uses her
+    persona framed as inner monologue (not a reply) - with no user turn, a reply-style
+    prompt pushes the model into greetings/dialogue, so this asks for a thought
+    instead. The caller decides whether the thought stays private or gets spoken aloud.
+    """
+    instruction = _WANDER_MODES.get(mode, _WANDER_MODES["curiosity"])
+
+    # Just her persona for voice; the inner-monologue framing is added below.
+    system_content = PERSONA
+    if mode == "memory" and memories:
+        recalled = "\n".join(f"- {m}" for m in memories)
+        system_content += (
+            "\n\nThings you actually remember (drift around one of these; never invent "
+            f"new events or people):\n{recalled}"
+        )
+    if mood_flavor:
+        system_content += f"\n\nCurrent mood: {mood_flavor}"
+    system_content += "\n" + _WANDER_FRAMING.format(instruction=instruction)
+    if recent_thoughts:
+        system_content += (
+            "\n\nYou were JUST recently thinking about the following, so drift somewhere "
+            "new instead of repeating these:\n"
+            + "\n".join(f"- {t}" for t in recent_thoughts)
+        )
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": system_content}],
+            max_tokens=80,
+            temperature=0.95,   # higher than replies: daydreams should roam
+        )
+        text = (response.choices[0].message.content or "").strip().strip('"')
+    except Exception:
+        return ""
+    return text
