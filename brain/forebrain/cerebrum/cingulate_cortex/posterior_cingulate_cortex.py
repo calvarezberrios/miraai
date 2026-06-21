@@ -52,10 +52,14 @@ from brain.forebrain.cerebrum.cingulate_cortex import subconscious_log
 # ---------------------------------------------------------------------------
 TICK_SEC = float(os.environ.get("MIRA_SUB_TICK", "0.5"))            # background loop cadence
 CONSIDER_DELAY_SEC = float(os.environ.get("MIRA_SUB_MULL", "1.5"))  # mull overheard talk this long before deciding
-WANDER_AFTER_SEC = float(os.environ.get("MIRA_WANDER_AFTER", "30")) # idle silence before her mind drifts
-WANDER_EVERY_SEC = float(os.environ.get("MIRA_WANDER_EVERY", "25")) # min gap between wandering thoughts
-WANDER_SPEAK_CHANCE = float(os.environ.get("MIRA_WANDER_SPEAK_CHANCE", "0.3"))   # chance a thought is voiced
-WANDER_SPEAK_COOLDOWN_SEC = float(os.environ.get("MIRA_WANDER_SPEAK_COOLDOWN", "120"))  # min gap between spoken musings
+WANDER_AFTER_SEC = float(os.environ.get("MIRA_WANDER_AFTER", "60")) # idle silence before her mind drifts
+WANDER_EVERY_SEC = float(os.environ.get("MIRA_WANDER_EVERY", "120")) # min gap between wandering thoughts (background, logged)
+WANDER_SPEAK_CHANCE = float(os.environ.get("MIRA_WANDER_SPEAK_CHANCE", "0.12"))  # chance a given thought is voiced (rare)
+WANDER_SPEAK_COOLDOWN_SEC = float(os.environ.get("MIRA_WANDER_SPEAK_COOLDOWN", "300"))  # min gap between spoken musings
+# She won't VOICE a wandering thought if no human has talked (text or voice) within this
+# long — she still thinks in the background (logged), she just doesn't talk to an empty
+# room. ("No one ELSE has talked": her own speech/daydreams don't count toward this.)
+WANDER_SHARE_SILENCE_SEC = float(os.environ.get("MIRA_WANDER_SHARE_SILENCE", "300"))
 THOUGHTS_SURFACED = int(os.environ.get("MIRA_THOUGHTS_SURFACED", "4"))   # recent thoughts offered to a reply
 LISTEN_TIMEOUT_SEC = float(os.environ.get("MIRA_LISTEN_TIMEOUT", "6"))   # drop "someone speaking" if partials stop w/o a final
 MIN_DRAFT_WORDS = int(os.environ.get("MIRA_MIN_DRAFT_WORDS", "4"))       # don't burn a slow generation on a 2-word fragment
@@ -83,11 +87,13 @@ _speak: Optional[Callable] = None     # main.py's serialized "Mira speaks" callb
 _thread: Optional[threading.Thread] = None        # the wander/decide loop
 _drafter: Optional[threading.Thread] = None       # the listen-and-draft loop
 _running = threading.Event()
+_paused = threading.Event()           # set while the DMN is suppressed (e.g. note-taking)
 
 _lock = threading.Lock()
 _consider_at: Optional[float] = None  # deadline to deliberate an overheard message (None = nothing pending)
 _last_channel = "local"                # channel of the most recent thing she heard
-_last_activity = 0.0                   # last time anything was said (heard or spoken)
+_last_activity = 0.0                   # last time anything was said (heard OR her own speech)
+_last_input = 0.0                      # last time a HUMAN talked (gates voicing daydreams; 0 = no one yet)
 _last_wander = 0.0                     # last time her mind wandered at all
 _last_wander_spoke = 0.0               # last time a wandering thought was voiced
 
@@ -139,11 +145,39 @@ def touch(now: Optional[float] = None) -> None:
     _last_activity = time.time() if now is None else now
 
 
+def note_input(now: Optional[float] = None) -> None:
+    """Mark that a HUMAN just talked (text or voice). Distinct from touch(): her own
+    speech/daydreams don't count here. Used to gate whether she'll VOICE a wandering
+    thought — she stays quiet (but keeps thinking privately) when no one's been active."""
+    global _last_input
+    _last_input = time.time() if now is None else now
+
+
+def pause() -> None:
+    """Suppress the default mode network — no drafting, deliberating, or wandering.
+    Used while she is taking notes (DLPFC top-down control quieting the DMN). Drops any
+    in-flight draft/deliberation so nothing escapes after the pause."""
+    global _consider_at
+    _paused.set()
+    _reset_listening()
+    with _lock:
+        _consider_at = None
+
+
+def resume() -> None:
+    """Bring the subconscious back online (note-taking ended)."""
+    global _last_activity
+    _paused.clear()
+    _last_activity = time.time()      # don't let her mind wander the instant she resumes
+
+
 def observe_partial(text: str, channel: str = "local") -> None:
     """Feed the subconscious a live partial transcript of what's being said right
     now. She marks that someone's speaking and (re)drafts a reply to it in the
     background, so she's ready to answer the moment they stop."""
     global _someone_speaking, _last_channel, _last_partial, _draft_req
+    if _paused.is_set():
+        return
     text = (text or "").strip()
     if not text:
         return
@@ -159,6 +193,7 @@ def observe_partial(text: str, channel: str = "local") -> None:
                 _draft_req += 1
                 wake = True
     touch()
+    note_input()                       # a live partial means a human is talking right now
     if wake:
         _draft_event.set()             # wake the drafter to refine the reply
 
@@ -185,6 +220,8 @@ def heard(now: Optional[float] = None, channel: str = "local") -> None:
     """Hand the subconscious an overheard (un-addressed) message to mull over.
     Arms a debounced deliberation; rapid bursts coalesce into one decision."""
     global _consider_at, _last_channel
+    if _paused.is_set():
+        return
     now = time.time() if now is None else now
     with _lock:
         _consider_at = now + CONSIDER_DELAY_SEC
@@ -214,6 +251,9 @@ def _drafter_loop() -> None:
             continue
         if not _running.is_set():
             break
+        if _paused.is_set():
+            _draft_event.clear()
+            continue                   # note-taking: don't draft replies
         # Let the partial settle. While the person is mid-phrase the transcript keeps
         # growing every ~0.7s; drafting each fragment would waste slow generations on
         # text that's about to change. So we wait for a brief pause (a phrase/sentence
@@ -312,6 +352,8 @@ def _loop() -> None:
 
 def _tick() -> None:
     global _consider_at, _someone_speaking
+    if _paused.is_set():
+        return                         # note-taking: the DMN is suppressed
     now = time.time()
 
     # Safety: if partials stopped without a final ever landing, stop "listening".
@@ -378,6 +420,7 @@ def _wander_tick() -> None:
         situation=_situation(),
         memories=memories if mode == "memory" else None,
         recent_thoughts=subconscious_log.recent(THOUGHTS_SURFACED),
+        history=history,                      # current session chat log (drift off it)
     )
     _last_wander = now
     if not thought:
@@ -388,9 +431,13 @@ def _wander_tick() -> None:
     if LOG_THOUGHTS:
         print(f"[mira's mind wanders] {thought}")
 
-    # Once in a while a thought escapes out loud — but never while someone's talking
-    # and never on top of an unanswered message.
-    if (now - _last_wander_spoke >= WANDER_SPEAK_COOLDOWN_SEC
+    # Once in a while a thought escapes out loud — but rarely, never while someone's
+    # talking, never on top of an unanswered message, and NEVER to a room where no human
+    # has spoken for a while (she keeps the thought private then). The thought above is
+    # already saved to her subconscious_log regardless of whether she voices it.
+    human_active = (_last_input > 0) and (now - _last_input <= WANDER_SHARE_SILENCE_SEC)
+    if (human_active
+            and now - _last_wander_spoke >= WANDER_SPEAK_COOLDOWN_SEC
             and random.random() < WANDER_SPEAK_CHANCE
             and not _someone_speaking
             and not thalamus.awaiting_reply()):

@@ -50,6 +50,9 @@ memory_store/
 *.db
 *.sqlite3
 
+# Note-taking sessions (DLPFC scribe) — contain conversation content (user data)
+notes/
+
 # VTuber assets (if large — Live2D/VRM models can be hefty)
 # Uncomment if you don't want them in the repo:
 # assets/models/

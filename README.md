@@ -147,6 +147,20 @@ Also confirm **ffmpeg** is on PATH (`ffmpeg -version`).
   DISCORD_BOT_TOKEN=your-bot-token-here
   MIRA_MODEL=mira          # the Ollama model Mira's brain talks to (default: qwen2.5:3b)
   ```
+- **LLM provider — Ollama (default) or Gemini.** Mira's chat brain talks to an
+  OpenAI-compatible endpoint, so you can point it at Google **Gemini** to compare
+  response quality. Set in `.env`:
+  ```
+  MIRA_LLM_PROVIDER=gemini             # "ollama" (default) or "gemini"
+  GEMINI_API_KEY=your-gemini-api-key
+  MIRA_GEMINI_MODEL=gemini-2.0-flash   # optional; e.g. gemini-2.5-flash, gemini-1.5-pro
+  ```
+  This routes `think` / `consider_speaking` / `wander`, the subconscious, the note-taking
+  scribe, **and** memory consolidation through Gemini. **Ollama is still required for
+  long-term memory**: embeddings stay on local `nomic-embed-text` because the Chroma store
+  is built with them (they can't switch providers without rebuilding the store). If Ollama
+  isn't running, chat still works on Gemini — she just won't recall or store memories that
+  run. Set `MIRA_LLM_PROVIDER=ollama` (or remove it) to go back to fully local.
 - **Discord bot token** (Discord mode only): set `DISCORD_BOT_TOKEN` in `.env` as above.
   In the Discord Developer Portal, enable the **Message Content Intent** (and, for reliable
   speaker names in voice, the **Server Members Intent**). Invite the bot to your server.
@@ -196,6 +210,24 @@ and RVC, if the Piper engine is enabled, is launched automatically as a subproce
   voice channel; `mira leave` to disconnect. Text chat works anywhere she can see.
 
 First run downloads the Whisper model (one-time).
+
+### Note-taking
+Mira can take notes of whatever she hears (local mic or a Discord voice channel) — but
+**only when asked**, and while she's taking notes she stays **silent and just listens**
+(her subconscious is paused too). Say or type:
+
+- **Start:** `take notes` (optionally `take notes about <topic>`). For a tabletop game,
+  `take TTRPG notes` / `take D&D notes` / `take game notes` → notes get organized **by
+  player and their character**. In Discord voice each speaker is recorded by name; you can
+  also tell her `Mira, Alice plays Lyra` to label a character.
+- **Recap:** `recap` / `summarize` / `what do you have so far` → she posts an organized
+  recap (to the console / Discord text channel — never spoken).
+- **Stop:** `stop taking notes` → she finalizes the file with topic- (or player/character-)
+  organized notes plus a summary.
+
+Notes are saved as one `.txt` per session under `notes\` (gitignored), named
+`<main-topic>_<timestamp>.txt`. The raw transcript is written live (so nothing is lost if
+the app crashes); quitting mid-session also finalizes the file.
 
 ---
 

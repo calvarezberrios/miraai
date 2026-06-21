@@ -74,5 +74,12 @@ class IOAdapter(ABC):
         """Block until everything queued by speak() has finished. Default: no-op."""
 
     # --- optional ---
+    def notify(self, text: str) -> None:
+        """Send a NON-voice status message to the user (used by note-taking mode, which
+        stays silent on the voice/avatar): start/stop confirmations, recaps, saved-file
+        paths. Default: print to the console. Adapters with a text channel (Discord)
+        override to post there too."""
+        print(text)
+
     def warmup(self) -> None:
         """Heat up any cold pipeline (e.g. CUDA kernels) at startup. Default: no-op."""

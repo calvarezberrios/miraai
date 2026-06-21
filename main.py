@@ -19,9 +19,11 @@ except Exception:
 from env_loader import load_env
 load_env()
 
-from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think
+from brain.forebrain.cerebrum.frontal_lobe.prefrontal_cortex import think, think_stream
+from brain.forebrain.cerebrum.frontal_lobe import prefrontal_cortex
 from brain.forebrain.cerebrum.frontal_lobe import motor_cortex
 from brain.forebrain.cerebrum.frontal_lobe import brocas_area
+from brain.forebrain.cerebrum.frontal_lobe import dorsolateral_prefrontal_cortex as scribe
 from brain.forebrain.cerebrum.cingulate_cortex import posterior_cingulate_cortex as subconscious
 from brain.hindbrain.cerebellum import coordinator as cerebellum
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
@@ -53,7 +55,19 @@ parser.add_argument(
     action="store_true",
     help="Run connected to Discord instead of the local mic/speaker.",
 )
+parser.add_argument(
+    "--subconscious",
+    action="store_true",
+    help="Enable the background subconscious: pre-drafting, autonomous chime-ins, and "
+         "mind-wandering. Off by default — the plain path is STT -> Mira -> TTS, where she "
+         "replies only when addressed.",
+)
 args = parser.parse_args()
+
+# Simplified pipeline by default: speech in -> Mira thinks (grounded in memories + this
+# session) -> speech out, with no background mind. Opt into the full subconscious with
+# --subconscious.
+USE_SUBCONSCIOUS = args.subconscious
 
 if args.discord:
     from peripheral_nervous_system.discord_adapter import DiscordAdapter
@@ -124,6 +138,34 @@ def describe_situation(event, prev_seen, now):
     return " ".join(parts)
 
 
+def _speak_streaming(stream, *, speaker, user_text, source):
+    """Speak Mira's reply sentence-by-sentence as the model writes it (called inside
+    turn_lock, by speak_reply). Enqueues each sentence the moment it lands so synthesis +
+    playback overlap generation, prints the line as it streams, and returns the full
+    assembled text for memory/logging. Pauses the ears (caller resumes them)."""
+    if speaker and user_text is not None:
+        print(f"\n{speaker}: {user_text}")
+    tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
+    adapter.pause_input()                             # don't let her hear herself
+    parts = []
+    try:
+        for sentence in stream:
+            if not (sentence and sentence.strip()):
+                continue
+            if not parts:
+                print(f"{tag}: {sentence}", end="", flush=True)
+                cerebellum.gesture_for_speech(sentence)   # first sentence sets the gesture
+            else:
+                print(f" {sentence}", end="", flush=True)
+            parts.append(sentence)
+            adapter.speak(sentence)                   # returns fast; the queue does the rest
+    except Exception as e:
+        print(f"\n[stream error: {e}]")
+    if parts:
+        print()                                       # close the streamed line
+    return " ".join(parts).strip()
+
+
 def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
                 speaker=None, source="reply"):
     """The one and only "Mira speaks" sequence, shared by the conscious foreground
@@ -131,30 +173,47 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
     daydreams). The turn_lock serializes it, so two lines can never overlap on the
     voice/avatar no matter which part of her mind started them.
 
+    `reply` is either a finished string OR a stream (iterator) of sentences from
+    think_stream(): in the streaming case she starts speaking sentence 1 while the model
+    is still writing the rest, then the full line is assembled for memory/logging.
+
     user_text is the message she's replying to (None for a spontaneous daydream)."""
     global message_count, last_consolidation
-    if not (reply and reply.strip()):
+    streaming = not isinstance(reply, str)
+    if not streaming and not (reply and reply.strip()):
         return
     # A daydream is something she muses ALOUD, not part of the conversation: it must
     # never enter the chat log (working memory / session log) — it already lives in
     # her private subconscious_log. Real replies and chime-ins do get logged.
     is_daydream = source == "daydream"
     with turn_lock:
-        if not is_daydream:
-            remember_reply(reply)
-            observe(user_text if user_text is not None else "", reply)
-
-        if is_daydream:
-            print(f"\nMira (daydream, {amygdala.mood}): {reply}\n")
+        if streaming:
+            # Low-latency: speak each sentence the instant it's generated, then assemble
+            # the full line. (Daydreams/chime-ins/pre-drafted replies pass a plain string.)
+            reply = _speak_streaming(reply, speaker=speaker, user_text=user_text, source=source)
+            if not (reply and reply.strip()):
+                adapter.resume_input()                # _speak_streaming paused the ears
+                return
+            if not is_daydream:
+                remember_reply(reply)
+                observe(user_text if user_text is not None else "", reply)
         else:
-            if speaker and user_text is not None:
-                print(f"\n{speaker}: {user_text}")
-            tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
-            print(f"{tag}: {reply}\n")
+            if not is_daydream:
+                remember_reply(reply)
+                observe(user_text if user_text is not None else "", reply)
 
-        cerebellum.gesture_for_speech(reply)          # gesture only if her words call for one
-        adapter.pause_input()                         # don't let her hear herself
-        adapter.speak(reply)
+            if is_daydream:
+                print(f"\nMira (daydream, {amygdala.mood}): {reply}\n")
+            else:
+                if speaker and user_text is not None:
+                    print(f"\n{speaker}: {user_text}")
+                tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
+                print(f"{tag}: {reply}\n")
+
+            cerebellum.gesture_for_speech(reply)      # gesture only if her words call for one
+            adapter.pause_input()                     # don't let her hear herself
+            adapter.speak(reply)
+
         adapter.wait_until_done()
         cerebellum.speaking_stopped()                 # close the mouth
         if interrupting:
@@ -165,7 +224,8 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
             # She replied -> keep the active-conversation window alive for this
             # channel, so follow-ups get relevance-checked without re-addressing.
             mark_engaged(channel)
-        subconscious.touch()                          # speaking counts as activity (delays wandering)
+        if USE_SUBCONSCIOUS:
+            subconscious.touch()                      # speaking counts as activity (delays wandering)
 
     if is_daydream:
         return
@@ -180,6 +240,13 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
 
 def handle_message(event, interrupting=False):
     now = time.time()
+
+    # Note-taking mode (DLPFC scribe). When she's taking notes she just listens: this
+    # consumes the event (records it, or handles a start/stop/recap/cast command) and
+    # she neither replies nor lets her subconscious chime in. Returns False when there's
+    # no active session AND this isn't a "take notes" command, so normal chat proceeds.
+    if scribe.intercept(event, notify=adapter.notify):
+        return
 
     # She follows the whole room: every message updates short-term context,
     # whether or not she ends up replying to it. (The subconscious reads this.)
@@ -199,7 +266,9 @@ def handle_message(event, interrupting=False):
 
     feel(event.text)                      # amygdala updates mood
     cerebellum.set_mood(amygdala.mood)    # her face follows the mood
-    subconscious.touch(now)               # any input resets the mind-wandering timer
+    if USE_SUBCONSCIOUS:
+        subconscious.touch(now)           # any input resets the mind-wandering timer
+        subconscious.note_input(now)      # a human just talked -> allows voicing daydreams again
 
     # Is she being directly addressed? (name / @ / reply / DM)
     addressed = False
@@ -213,15 +282,17 @@ def handle_message(event, interrupting=False):
         addressed = decision.respond and decision.reason == "addressed"
 
     if interrupting or addressed:
-        # Directly addressed -> she answers now. While the person was talking, her
-        # subconscious was already drafting a reply against the live transcript; if
-        # that draft still fits what they actually said, speak it straight away
-        # (no transcribe-then-think gap). Otherwise think fresh as a fallback.
+        # Directly addressed -> she answers now, thinking fresh and grounded in this
+        # session + her recalled memories. (With --subconscious she may instead reuse a
+        # reply her background mind already drafted while the person was still talking.)
         reply = None
-        if addressed and not interrupting:
-            reply = subconscious.take_draft(event.text)
-        else:
-            subconscious.end_listening()   # interrupt: don't reuse the draft
+        inner_thoughts = None
+        if USE_SUBCONSCIOUS:
+            if addressed and not interrupting:
+                reply = subconscious.take_draft(event.text)
+            else:
+                subconscious.end_listening()   # interrupt: don't reuse the draft
+            inner_thoughts = subconscious.recent_thoughts(event.text)
 
         if not reply:
             memories = recall(event.text)
@@ -229,18 +300,23 @@ def handle_message(event, interrupting=False):
                 memories = [f"From our last session: {previous_session}"] + memories
             flavor = color() + (INTERRUPT_NOTE if interrupting else "")
             situation = describe_situation(event, prev_seen, now)
-            reply = think(context, flavor, memories, situation=situation,
-                          inner_thoughts=subconscious.recent_thoughts(event.text))
+            # Stream the fresh reply so her voice starts on sentence 1 while the rest is
+            # still being written (the big win for longer rants).
+            reply = think_stream(context, flavor, memories, situation=situation,
+                                 inner_thoughts=inner_thoughts)
 
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
     else:
-        # Not addressed -> hand it to the subconscious to mull over in the
-        # background. It decides on its own whether/what/when to chime in.
-        subconscious.end_listening()       # stop drafting; this wasn't for her to answer now
+        # Not addressed. With the subconscious on, hand it off to mull over a possible
+        # chime-in; otherwise she simply listens (plain STT -> Mira -> TTS answers only
+        # when she's actually addressed).
+        if USE_SUBCONSCIOUS:
+            subconscious.end_listening()   # stop drafting; this wasn't for her to answer now
         if LOG_HEARD:
             print(f"[heard] {event.speaker}: {event.text}")
-        subconscious.heard(now, channel=chan_key)
+        if USE_SUBCONSCIOUS:
+            subconscious.heard(now, channel=chan_key)
 
 
 def on_event(ev):
@@ -259,8 +335,10 @@ def on_event(ev):
         line = prefix + text
         print("\r" + line + " " * max(0, cols - len(line) - 1), end="", flush=True)
         # She listens AND drafts at the same time: each partial refines a reply that
-        # will be ready the instant the speaker stops.
-        subconscious.observe_partial(ev.text or "", channel=ev.channel)
+        # will be ready the instant the speaker stops. (Not while taking notes — then
+        # she only listens, so there's no draft and the subconscious is paused.)
+        if USE_SUBCONSCIOUS and not scribe.is_active():
+            subconscious.observe_partial(ev.text or "", channel=ev.channel)
     elif ev.kind == INTERRUPT:
         handle_message(ev, interrupting=True)
     else:  # FINAL
@@ -285,15 +363,24 @@ try:
 
     adapter.start(on_event)
     adapter.warmup()    # heat up TTS so her first real reply is fast
+    # Heat the LLM too: on a CPU-expert model (turbo) the first persona prefill is a ~2 min
+    # cold cost — do it in the background now so the user's first turn is warm.
+    threading.Thread(target=prefrontal_cortex.warmup, daemon=True).start()
 
-    # Bring her subconscious online: it listens to everything she overhears and
-    # decides on its own when to chime in, and lets her mind wander when it's quiet.
-    subconscious.start(speak=speak_reply, session_recap=previous_session)
+    # Bring her subconscious online (only with --subconscious): it listens to everything
+    # she overhears, decides when to chime in, and lets her mind wander when it's quiet.
+    if USE_SUBCONSCIOUS:
+        subconscious.start(speak=speak_reply, session_recap=previous_session)
+        print("[subconscious: ON — drafting, chime-ins, mind-wandering]\n")
+    else:
+        print("[subconscious: OFF — plain STT -> Mira -> TTS, replies when addressed]\n")
 
     while True:
         typed = input().strip()
         if typed.lower() in ("quit", "exit"):
-            subconscious.stop()                       # quiet her mind first
+            scribe.finalize_if_active(notify=adapter.notify)  # save any open note session
+            if USE_SUBCONSCIOUS:
+                subconscious.stop()                   # quiet her mind first
             adapter.stop()
             run_consolidation()                       # flush atomic facts
             try:

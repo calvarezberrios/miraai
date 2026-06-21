@@ -13,6 +13,7 @@ Two flavors of memory formation:
                             last time".
 """
 
+import os
 import time
 import uuid
 from datetime import datetime
@@ -20,10 +21,27 @@ from datetime import datetime
 import chromadb
 from openai import OpenAI
 
-# Same local Ollama endpoint the chat model uses.
-_client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+from brain.forebrain.cerebrum.frontal_lobe import prefrontal_cortex as _pfc
+
+# Embeddings ALWAYS run on an Ollama with nomic-embed-text: the Chroma store below is
+# built with this model, so the embedding provider can't change without rebuilding the
+# store. (This is why an Ollama is still needed for long-term memory even when the chat
+# brain is elsewhere — Gemini, Groq, or a remote llama.cpp.)
+#
+# MIRA_EMBED_BASE_URL lets embeddings point somewhere OTHER than the chat endpoint. This
+# matters in a split setup: when the chat brain is a remote llama.cpp (OLLAMA_BASE_URL ->
+# another PC's :8080, which has no nomic-embed-text), set MIRA_EMBED_BASE_URL to an Ollama
+# that does (a local one, or that PC's :11434). Defaults to OLLAMA_BASE_URL, so single-box
+# setups are unchanged.
+_embed_client = OpenAI(
+    base_url=os.environ.get(
+        "MIRA_EMBED_BASE_URL",
+        os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")),
+    api_key="ollama")
 EMBED_MODEL = "nomic-embed-text"
-CHAT_MODEL = "llama3.2:3b"  # used for consolidation / summary reasoning
+
+# Consolidation / session-summary reasoning reuses the main chat client + model, so it
+# follows MIRA_LLM_PROVIDER (Ollama or Gemini) — one provider for all of Mira's thinking.
 
 # On-disk store -- survives restarts. Folder is created on first run.
 _db = chromadb.PersistentClient(path="./memory_store")
@@ -32,27 +50,40 @@ _collection = _db.get_or_create_collection(name="mira_memory")
 
 def _embed(text):
     """Turn text into a vector using the local embedding model."""
-    resp = _client.embeddings.create(model=EMBED_MODEL, input=text)
+    resp = _embed_client.embeddings.create(model=EMBED_MODEL, input=text)
     return resp.data[0].embedding
 
 
 def remember(text, kind="fact"):
-    """Store a long-term memory. `kind` tags it (fact, session_summary, ...)."""
+    """Store a long-term memory. `kind` tags it (fact, session_summary, ...). If the
+    local embedder is unreachable (e.g. Ollama not running on a Gemini-only run), the
+    memory is skipped rather than crashing the caller."""
+    try:
+        embedding = _embed(text)
+    except Exception as e:
+        print(f"[hippocampus] embed unavailable — memory not stored: {e}")
+        return
     _collection.add(
         ids=[str(uuid.uuid4())],
-        embeddings=[_embed(text)],
+        embeddings=[embedding],
         documents=[text],
         metadatas=[{"kind": kind, "ts": time.time()}],
     )
 
 
 def recall(query, n=3):
-    """Return up to `n` stored memories most relevant to `query`."""
+    """Return up to `n` stored memories most relevant to `query`. Degrades to no recall
+    (empty list) if the local embedder is unreachable, so chat still works without Ollama."""
     count = _collection.count()
     if count == 0:
         return []
+    try:
+        query_embedding = _embed(query)
+    except Exception as e:
+        print(f"[hippocampus] embed unavailable — no recall this turn: {e}")
+        return []
     results = _collection.query(
-        query_embeddings=[_embed(query)],
+        query_embeddings=[query_embedding],
         n_results=min(n, count),
         include=["documents"],
     )
@@ -74,12 +105,19 @@ _session_log = []  # full transcript for this run (cleared by summarize_session)
 _CONSOLIDATION_PROMPT = (
     "You are the memory-formation process for a VTuber named Mira. "
     "Read the conversation excerpt and extract only durable facts worth "
-    "remembering long-term: people's names, preferences, recurring viewers, "
-    "promises made, and notable events. Ignore small talk, jokes, flirting, "
-    "and anything trivial or fleeting. Write each fact as one short, standalone "
-    "sentence in the third person (e.g. \"The user's name is Sam.\" or "
-    "\"The user is learning to play guitar.\"). One fact per line, no numbering "
-    "or bullets. If nothing is worth remembering, reply with exactly: NOTHING"
+    "remembering long-term ABOUT OTHER PEOPLE AND EVENTS: the people she talks to "
+    "(their real names, preferences, what they're up to), recurring viewers, "
+    "promises made, and notable events. "
+    "Do NOT record anything about Mira herself - her appearance, personality, "
+    "backstory, feelings, or that she is an AI/kitsune/the creator's creation. She "
+    "already knows who she is; storing self-descriptions makes her talk about herself "
+    "in the third person, so never write a fact whose subject is Mira. "
+    "Ignore small talk, jokes, flirting, role/mention tokens like \"@everyone\" or "
+    "\"@Mira\", and anything trivial or fleeting. "
+    "Write each fact as one short, standalone sentence in the third person (e.g. "
+    "\"Sam is learning to play guitar.\"). Use real names, never \"@everyone\". "
+    "One fact per line, no numbering or bullets. If nothing is worth remembering, "
+    "reply with exactly: NOTHING"
 )
 
 _SESSION_SUMMARY_PROMPT = (
@@ -101,10 +139,11 @@ def observe(user_message, reply):
 
 
 def _digest(prompt, log, temperature):
-    """Run the LLM over a transcript with the given system prompt."""
+    """Run the LLM over a transcript with the given system prompt. Uses the main chat
+    client/model, so consolidation follows the active provider (Ollama or Gemini)."""
     transcript = "\n".join(f"{m['role']}: {m['content']}" for m in log)
-    resp = _client.chat.completions.create(
-        model=CHAT_MODEL,
+    resp = _pfc.client.chat.completions.create(
+        model=_pfc.MODEL,
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": transcript},

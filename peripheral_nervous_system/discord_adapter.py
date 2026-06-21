@@ -129,6 +129,7 @@ class DiscordAdapter(IOAdapter):
         self._voice_thread: Optional[threading.Thread] = None
         self._inbox = queue.Queue()
         self._current_target = ("text", None)   # ("text", channel) | ("voice", None)
+        self._last_text_channel = None           # most recent text channel seen (for notify())
         self._running = False
 
         # voice
@@ -208,6 +209,9 @@ class DiscordAdapter(IOAdapter):
                 content = (message.clean_content or "").strip()
                 if not content:
                     return
+
+                # remember where to post non-voice notices (note-taking confirmations/recaps)
+                self._last_text_channel = message.channel
 
                 low = content.lower()
                 if low in JOIN_COMMANDS:
@@ -619,6 +623,21 @@ class DiscordAdapter(IOAdapter):
             self._speak_voice(text)
         else:
             self._speak_text(text, target)
+
+    def notify(self, text: str) -> None:
+        """Non-voice status channel for note-taking (confirmations / recaps / saved paths).
+        Always prints to the console, and best-effort posts to the most recent text channel
+        so a Discord user sees it. Never uses the voice — note-taking stays silent."""
+        if not text:
+            return
+        print(text)
+        ch = self._last_text_channel
+        if ch is None or self._loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(ch.send(text[:2000]), self._loop)
+        except Exception as e:
+            print(f"[Discord] notify failed: {e}")
 
     def _speak_text(self, text, channel):
         if not text or channel is None or self._loop is None:

@@ -6,6 +6,71 @@ human brain reference + build plan docs) to get back up to speed.
 
 ---
 
+## Note-taking mode (DLPFC scribe) — NEW (READ FIRST)
+
+Mira can now **take notes** of what she hears — local mic or Discord voice — but **only
+when asked**. While a session is active she **does not speak or chime in**: she just
+listens and records. New brain region (per `human_brain_reference.md`, this is working
+memory + sustained attention + top-down control = the **dorsolateral prefrontal cortex**):
+`brain/forebrain/cerebrum/frontal_lobe/dorsolateral_prefrontal_cortex.py` (aliased
+`scribe` in `main.py`). Sits beside `prefrontal_cortex.py`; does NOT overload it.
+
+- **How it works:** `main.py` `handle_message()` first calls `scribe.intercept(event,
+  notify=adapter.notify)`. If it consumes the event (a command, or an utterance to
+  record while active) main returns immediately — no reply, no subconscious. `on_event`
+  also skips `subconscious.observe_partial` while active.
+- **Subconscious is paused** during a session via new `posterior_cingulate_cortex.pause()
+  /resume()` (a `_paused` Event gating `_tick`, the drafter, `observe_partial`, `heard`),
+  so the default-mode network can't daydream aloud and break the silence.
+- **Commands** (matched on the heard/typed text; leading "mira" optional):
+  - start: `take notes` / `start taking notes` / `take notes about <topic>`;
+    **TTRPG**: `take dnd/ttrpg/rpg/game/campaign notes` → ttrpg profile.
+  - `recap` / `summarize` / `what do you have so far` → delivers an organized recap.
+  - `stop taking notes` / `end notes` / `done taking notes` → finalize + save.
+  - TTRPG cast (only when addressed): `Alice plays Lyra` / `I'm playing Lyra`.
+- **Comms are TEXT/CONSOLE ONLY** (user decision): confirmations + recaps go through
+  `adapter.notify()` — new method on `IOAdapter` (default `print`); `DiscordAdapter`
+  overrides it to also post to the last text channel (`self._last_text_channel`). Voice
+  stays silent.
+- **Files:** one `.txt` per session in `notes/` (gitignored). Raw transcript written
+  **live** (crash-safe, attributed `[HH:MM:SS] Speaker: text`). At stop/quit the LLM
+  (reusing `prefrontal_cortex.client`/`MODEL`, kept hot) appends a topic-organized body
+  (TTRPG: organized **by player & character** with Cast/Story/NPCs/Quests/Loot sections)
+  + a SUMMARY + footer, then the file is **renamed** to `<derived-topic>_<timestamp>.txt`.
+  `recap` is delivery-only (not written). LLM runs only at recap/finalize, never
+  per-utterance (6GB VRAM / one-model-at-a-time).
+- **Quit mid-session auto-finalizes** (`scribe.finalize_if_active()` in the quit branch)
+  so notes aren't lost.
+- Verified with an isolated functional test (stubbed LLM + subconscious): start/record/
+  recap/stop, TTRPG cast + grouping, inactive passthrough, empty-session, already-active.
+  No new dependencies.
+
+---
+
+## LLM provider — Gemini option (NEW)
+
+Mira's chat brain can now run on **Google Gemini** instead of local Ollama, to compare
+response quality. Both speak the OpenAI API, so the switch is just base_url/key/model on
+the shared client (`prefrontal_cortex.client` / `MODEL`). Set in `.env`:
+`MIRA_LLM_PROVIDER=gemini`, `GEMINI_API_KEY=...`, optional `MIRA_GEMINI_MODEL`
+(default `gemini-2.0-flash`). Default provider is `ollama` (unchanged).
+
+- Routes through Gemini: `think` / `consider_speaking` / `wander`, the **subconscious**
+  (reuses the client), the **note-taking scribe** (reuses it), and **consolidation/summary**
+  (`hippocampus._digest` now reuses `prefrontal_cortex.client`/`MODEL` — this also retired
+  the stale `CHAT_MODEL = "llama3.2:3b"`).
+- **Embeddings stay on Ollama** (`nomic-embed-text`, dedicated `hippocampus._embed_client`):
+  the Chroma store is built with them and can't switch providers without a rebuild. So
+  **Ollama is still required for long-term memory** even on Gemini. `recall()`/`remember()`
+  now **degrade gracefully** (skip, no crash) if the embedder is unreachable, so a
+  Gemini-only run (Ollama off) still chats — just without memory that run.
+- Startup logs the active provider: `[prefrontal_cortex] LLM provider: gemini (model: ...)`.
+- Implementation: provider branch at the top of `prefrontal_cortex.py`. Verified the switch
+  selects the right client/base_url/model under both providers (no live Gemini key tested —
+  user supplies `GEMINI_API_KEY`).
+
+---
+
 ## Recent changes — 2026-06-18 (READ FIRST; supersedes stale bits below)
 
 - **Fine-tuned chat model.** Mira's conversational model was fine-tuned on the
@@ -242,6 +307,7 @@ avatar\
 D:\aiproject\
 ├── main.py                 # entry point — routes ALL I/O through the active adapter
 ├── memory_store\           # Chroma vector store (auto-created, gitignored)
+├── notes\                  # [NEW] note-taking sessions, one .txt each (auto-created, gitignored)
 ├── clock.json              # persistent last-active timestamp (gitignored)
 ├── PRIVACY_POLICY.md       # template (placeholders to fill: operator, contact, date, jurisdiction)
 ├── TERMS_OF_SERVICE.md     # template (same placeholders)
@@ -256,6 +322,7 @@ D:\aiproject\
     │   ├── cerebrum\
     │   │   ├── frontal_lobe\
     │   │   │   ├── prefrontal_cortex.py   # persona + GROUNDING + think() + consider_speaking()
+    │   │   │   ├── dorsolateral_prefrontal_cortex.py  # [NEW] scribe: note-taking mode (record/organize/save)
     │   │   │   ├── brocas_area.py         # TTS: Piper (+ optional RVC) pipeline + lip-sync envelope
     │   │   │   ├── motor_cortex.py        # [NEW] avatar server: face (mood) + body (VRMA gestures)
     │   │   │   └── voice\reference.wav
