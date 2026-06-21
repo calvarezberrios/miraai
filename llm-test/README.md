@@ -69,6 +69,24 @@ This config is at the edge of the hardware. If the model gets killed or Windows 
 - Drop to a smaller quant (e.g. `Q3_K_M`, ~16 GB) via `02-download-model.ps1 -File Qwen_Qwen3.6-35B-A3B-Q3_K_M.gguf` and pass `-Model` to the run scripts.
 - Raise `--n-cpu-moe` to push more experts to CPU (less VRAM, slower).
 
+## Validated results (this machine, 2026-06-21)
+Both configs ran end-to-end on the GTX 1660 SUPER / 24 GB box:
+
+| Config | Ctx | Load time | Output | Speed | VRAM |
+|---|---|---|---|---|---|
+| Stock (f16 KV) | 128k | ~225s | `43` for "17+26" ✓ | ~2.7 tok/s | model+KV in 6 GB, experts on CPU |
+| **TurboQuant** (turbo4/turbo3 KV) | **256k** | ~200s | `Tokyo` for capital of Japan ✓ | ~0.9 tok/s | **5669/6144 MiB** |
+
+Notes from bring-up (fixes already folded into the scripts):
+- The image entrypoint is `/app/llama-server`, so the `llama-server` token in the
+  original stock command is a duplicate that errors (`invalid argument`). Removed.
+- Building on a Windows bind-mount can't create versioned `.so` symlinks
+  (`Operation not permitted`) → static build (`-DBUILD_SHARED_LIBS=OFF`).
+- Qwen3.6 is a **reasoning** model: without `--jinja` the `<think>` block isn't
+  parsed and short `max_tokens` returns empty `content`. The TurboQuant run uses
+  `--jinja`; give it ≥150 `max_tokens`. Reasoning lands in `message.reasoning_content`.
+- Throughput is low because experts run on CPU — expected for a 35B MoE on 6 GB VRAM.
+
 ## Security note
 The `discord.gg` invite from the instructions was **not** used and isn't trusted —
 all downloads here come from Hugging Face (`bartowski`) and GitHub (`TheTom`) over HTTPS.

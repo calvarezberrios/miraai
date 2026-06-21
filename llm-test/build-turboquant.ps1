@@ -27,7 +27,11 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq build-essential cmake git libcurl4-openssl-dev ccache >/dev/null
 cd /work
-cmake -B build -DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release
+# Static build: versioned .so symlinks can't be created on a Windows bind-mount
+# (drvfs) -> "Operation not permitted". Static libs (.a) avoid symlinks and give a
+# single self-contained llama-server. LLAMA_CURL off: model is always mounted locally.
+rm -rf build
+cmake -B build -DGGML_CUDA=ON -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j"$(nproc)" --target llama-server
 echo "=== build done ==="
 ls -la /work/build/bin/llama-server

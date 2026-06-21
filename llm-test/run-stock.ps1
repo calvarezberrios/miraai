@@ -27,7 +27,6 @@ docker run --rm -it `
   -p ${Port}:8080 `
   -v ${ModelDir}:/models `
   ghcr.io/ggml-org/llama.cpp:server-cuda `
-  llama-server `
     -m /models/$Model `
     --host 0.0.0.0 --port 8080 `
     -ngl 999 `
