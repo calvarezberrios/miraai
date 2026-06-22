@@ -74,7 +74,7 @@ LEAVE_COMMANDS = {"mira leave", "mira, leave", "!leave", "mira go away"}
 # ----------------------------------------------------------------------------
 VOICE_BLOCK_SEC = 0.05      # ticker granularity (matches local BLOCK_SEC)
 VOICE_REFRESH_SEC = 0.7     # how often to re-run VAD + live transcription (matches local)
-VOICE_END_SILENCE = float(os.environ.get("MIRA_VOICE_END_SILENCE", "1.2"))
+VOICE_END_SILENCE = float(os.environ.get("MIRA_VOICE_END_SILENCE", "2.5"))
                             # trailing (synthesized) silence that ends a turn. Tune with
                             # MIRA_VOICE_END_SILENCE: raise toward 3.0 if your py-cord receive
                             # build delivers audio in late bursts (gaps mid-sentence can otherwise

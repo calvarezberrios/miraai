@@ -12,6 +12,9 @@ set OLLAMA_BASE_URL=http://%PC_IP%:8080/v1
 set MIRA_EMBED_BASE_URL=http://%PC_IP%:11434/v1
 set MIRA_MODEL=turbo
 set MIRA_NO_THINK=1
+REM float16 + small.en = faster, more accurate STT on a modern GPU (int8/"small" were
+REM old-PC compromises). For even faster, use base.en; if fp16 errors, int8_float16.
 set WHISPER_DEVICE=cuda
-set WHISPER_MODEL_SIZE=small
+set WHISPER_MODEL_SIZE=small.en
+set WHISPER_COMPUTE_TYPE=float16
 python main.py --discord
