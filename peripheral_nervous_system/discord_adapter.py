@@ -74,7 +74,7 @@ LEAVE_COMMANDS = {"mira leave", "mira, leave", "!leave", "mira go away"}
 # ----------------------------------------------------------------------------
 VOICE_BLOCK_SEC = 0.05      # ticker granularity (matches local BLOCK_SEC)
 VOICE_REFRESH_SEC = 0.7     # how often to re-run VAD + live transcription (matches local)
-VOICE_END_SILENCE = float(os.environ.get("MIRA_VOICE_END_SILENCE", "2.0"))
+VOICE_END_SILENCE = float(os.environ.get("MIRA_VOICE_END_SILENCE", "1.2"))
                             # trailing (synthesized) silence that ends a turn. Tune with
                             # MIRA_VOICE_END_SILENCE: raise toward 3.0 if your py-cord receive
                             # build delivers audio in late bursts (gaps mid-sentence can otherwise
@@ -131,6 +131,8 @@ class DiscordAdapter(IOAdapter):
         self._work_thread: Optional[threading.Thread] = None
         self._voice_thread: Optional[threading.Thread] = None
         self._inbox = queue.Queue()
+        self._voice_synth_q = queue.Queue()      # sentences awaiting synthesis (synth-ahead)
+        self._voice_play_q = queue.Queue()       # synthesized WAVs awaiting VC playback
         self._current_target = ("text", None)   # ("text", channel) | ("voice", None)
         self._last_text_channel = None           # most recent text channel seen (for notify())
         self._running = False
@@ -185,6 +187,12 @@ class DiscordAdapter(IOAdapter):
         self._work_thread.start()
         self._voice_thread = threading.Thread(target=self._voice_worker, daemon=True)
         self._voice_thread.start()
+        # voice output pipeline: synthesize sentences AHEAD of playback so N+1 is made
+        # while N is still playing in the VC (the overlap that makes local feel snappy).
+        self._voice_synth_thread = threading.Thread(target=self._voice_synth_worker, daemon=True)
+        self._voice_synth_thread.start()
+        self._voice_play_thread = threading.Thread(target=self._voice_play_worker, daemon=True)
+        self._voice_play_thread.start()
 
         # Create the loop up front (other threads schedule onto it via
         # run_coroutine_threadsafe), but build the Client INSIDE the runner
@@ -253,6 +261,8 @@ class DiscordAdapter(IOAdapter):
     def stop(self) -> None:
         self._running = False
         self._inbox.put(_STOP)
+        self._voice_synth_q.put(_STOP)   # unblock the voice-output workers
+        self._voice_play_q.put(_STOP)
         if self._client is not None and self._loop is not None and self._loop.is_running():
             try:
                 if self._voice_client is not None:
@@ -655,6 +665,10 @@ class DiscordAdapter(IOAdapter):
             print(f"[Discord] send failed: {e}")
 
     def _speak_voice(self, text):
+        """Queue a reply for VC playback. Returns fast — the synth worker makes each
+        sentence while the play worker streams the previous one into the VC (overlap),
+        instead of the old synth->play->synth serial path. wait_until_done() blocks the
+        turn until it's all spoken."""
         brocas = self._brocas
         vc = self._voice_client
         if not text or brocas is None or vc is None or not vc.is_connected():
@@ -663,9 +677,42 @@ class DiscordAdapter(IOAdapter):
         if not cleaned:
             return
         for sentence in brocas._split_sentences(cleaned):
-            wav = brocas._synthesize(sentence)
-            if wav:
+            self._voice_synth_q.put(sentence)
+
+    def _voice_synth_worker(self):
+        """Synthesize queued sentences ahead of playback; hand each WAV to the play queue."""
+        while self._running:
+            sentence = self._voice_synth_q.get()
+            try:
+                if sentence is _STOP:
+                    break
+                brocas = self._brocas
+                wav = brocas._synthesize(sentence) if brocas else None
+                if wav:
+                    self._voice_play_q.put(wav)
+            except Exception as e:
+                print(f"[Discord voice] synth error: {e}")
+            finally:
+                self._voice_synth_q.task_done()
+
+    def _voice_play_worker(self):
+        """Play synthesized sentences into the VC in order, one at a time."""
+        while self._running:
+            wav = self._voice_play_q.get()
+            try:
+                if wav is _STOP:
+                    break
                 self._play_wav_in_vc(wav)   # blocks until this sentence finishes
+            except Exception as e:
+                print(f"[Discord voice] play error: {e}")
+            finally:
+                self._voice_play_q.task_done()
+
+    def wait_until_done(self) -> None:
+        """Block until everything queued for the VC is synthesized AND played, so the turn
+        (and pause-input) holds until she has actually finished speaking."""
+        self._voice_synth_q.join()
+        self._voice_play_q.join()
 
     def _play_wav_in_vc(self, wav_bytes):
         vc = self._voice_client
