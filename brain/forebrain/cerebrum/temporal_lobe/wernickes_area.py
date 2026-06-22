@@ -42,7 +42,10 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 SAMPLE_RATE = 16000
 BLOCK_SEC = 0.05            # mic callback chunk size
 REFRESH_SEC = 0.7           # how often live partials update
-END_SILENCE_SEC = 3.0       # trailing silence that ends an utterance
+# Trailing silence that ends an utterance. 3.0 was very laggy (3s dead air before she even
+# starts thinking); 1.2 feels responsive. Tune with MIRA_END_SILENCE_SEC — raise it if she
+# cuts you off when you pause mid-thought, lower it for snappier turn-taking.
+END_SILENCE_SEC = float(os.environ.get("MIRA_END_SILENCE_SEC", "1.2"))
 INTERRUPT_AFTER_SEC = 25.0  # monologue length that lets Mira interrupt
 # On a roomy GPU bump these via env: MODEL_SIZE=medium/large-v3, COMPUTE_TYPE=float16.
 # (The old 1660 Super had a broken fp16 path; int8/small were a VRAM compromise.)

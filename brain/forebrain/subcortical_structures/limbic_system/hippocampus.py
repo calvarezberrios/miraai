@@ -71,9 +71,20 @@ def remember(text, kind="fact"):
     )
 
 
-def recall(query, n=3):
-    """Return up to `n` stored memories most relevant to `query`. Degrades to no recall
-    (empty list) if the local embedder is unreachable, so chat still works without Ollama."""
+# How close a memory must be (L2 distance from the query embedding) to count as relevant
+# enough to surface. Calibrated on nomic-embed-text: genuinely on-topic queries land
+# ~0.5-0.8; generic chit-chat ("how are you", "lol") and things she has no memory of land
+# ~1.0-1.2. So ~0.85 injects real matches and otherwise stays quiet. Tune with
+# MIRA_RECALL_MAX_DISTANCE (raise = recall more eagerly, lower = stricter).
+_RECALL_MAX_DISTANCE = float(os.environ.get("MIRA_RECALL_MAX_DISTANCE", "0.85"))
+
+
+def recall(query, n=3, max_distance=None):
+    """Quick semantic search for memories actually RELEVANT to `query`. Returns only the
+    memories close enough to be about what's being discussed (distance <= the threshold),
+    so a name/fact/detail in the conversation pulls what she knows about it, while generic
+    chatter pulls nothing — no random facts bleeding in, and a smaller prompt to prefill.
+    Empty list if nothing clears the bar or the embedder is unreachable."""
     count = _collection.count()
     if count == 0:
         return []
@@ -85,9 +96,12 @@ def recall(query, n=3):
     results = _collection.query(
         query_embeddings=[query_embedding],
         n_results=min(n, count),
-        include=["documents"],
+        include=["documents", "distances"],
     )
-    return results["documents"][0]
+    docs = results["documents"][0]
+    dists = results["distances"][0]
+    bar = _RECALL_MAX_DISTANCE if max_distance is None else max_distance
+    return [d for d, dist in zip(docs, dists) if dist <= bar]
 
 
 def forget_all():
