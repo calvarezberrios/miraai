@@ -74,13 +74,16 @@ LEAVE_COMMANDS = {"mira leave", "mira, leave", "!leave", "mira go away"}
 # ----------------------------------------------------------------------------
 VOICE_BLOCK_SEC = 0.05      # ticker granularity (matches local BLOCK_SEC)
 VOICE_REFRESH_SEC = 0.7     # how often to re-run VAD + live transcription (matches local)
-VOICE_END_SILENCE = 2.0     # trailing silence that ends a turn. Local uses 3.0; 2.0 is a touch
-                            # snappier. Raise toward 3.0 if your py-cord receive build delivers
-                            # audio in late bursts (gaps mid-sentence can otherwise look like a
-                            # stop and chop the turn); lower toward 1.0 if delivery is steady.
+VOICE_END_SILENCE = float(os.environ.get("MIRA_VOICE_END_SILENCE", "2.0"))
+                            # trailing (synthesized) silence that ends a turn. Tune with
+                            # MIRA_VOICE_END_SILENCE: raise toward 3.0 if your py-cord receive
+                            # build delivers audio in late bursts (gaps mid-sentence can otherwise
+                            # look like a stop and chop the turn); lower toward 1.0 if steady.
 VOICE_MIN_SECONDS = 0.4     # ignore utterances with less speech than this (coughs, blips)
 VOICE_MAX_SECONDS = 30.0    # force-finalize a monologue this long so the buffer can't grow forever
-VOICE_DEBUG = False         # print receive/finalize/transcribe diagnostics
+VOICE_DEBUG = os.environ.get("MIRA_VOICE_DEBUG", "0").strip().lower() not in ("0", "false", "no", "")
+# ^ set MIRA_VOICE_DEBUG=1 to print receive/finalize/transcribe diagnostics (use this to tell
+#   whether audio is even reaching the sink vs. an endpointing problem).
 
 _STOP = object()  # sentinel to stop the worker
 
