@@ -611,6 +611,9 @@ class DiscordAdapter(IOAdapter):
                     print(f"[voice] {speaker}: {text}")
                     vc_channel = self._voice_client.channel if self._voice_client else None
                     self._current_target = ("voice", None)
+                    # Voice is NOT auto-addressed. handle_message runs a chime-in decision on
+                    # un-named voice (she joins in if it's relevant or about her, else stays
+                    # quiet). Saying "Mira" still forces a direct reply via name_mentioned.
                     self._emit(InputEvent(text=text, speaker=speaker, kind=FINAL,
                                           channel="discord_voice", raw=vc_channel))
             except Exception as e:

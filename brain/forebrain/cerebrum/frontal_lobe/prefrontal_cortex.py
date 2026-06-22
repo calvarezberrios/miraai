@@ -346,6 +346,7 @@ def consider_speaking(history: list[dict], mood_flavor: str = "", memories = Non
             ],
             max_tokens=300,
             temperature=0.7,
+            extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
         )
         text = (response.choices[0].message.content or "").strip()
     except Exception:
