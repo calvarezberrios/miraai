@@ -307,10 +307,25 @@ def handle_message(event, interrupting=False):
 
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
+    elif event.channel == "discord_voice":
+        # In a voice channel she's an active participant, not a command bot: she wasn't
+        # named, so SHE decides whether to chime in on what was said — joining if it's
+        # relevant or about her, staying quiet otherwise. One call both decides and writes
+        # the line (returns "" to stay silent).
+        memories = recall(event.text)
+        if previous_session:
+            memories = [f"From our last session: {previous_session}"] + memories
+        situation = describe_situation(event, prev_seen, now)
+        line = prefrontal_cortex.consider_speaking(
+            context, color(), memories, situation=situation)
+        if line:
+            speak_reply(line, user_text=event.text, channel=chan_key,
+                        speaker=event.speaker, source="chime-in")
+        elif LOG_HEARD:
+            print(f"[heard] {event.speaker}: {event.text}")
     else:
-        # Not addressed. With the subconscious on, hand it off to mull over a possible
-        # chime-in; otherwise she simply listens (plain STT -> Mira -> TTS answers only
-        # when she's actually addressed).
+        # Other un-addressed input (e.g. Discord text not @/named). With the subconscious
+        # on, hand it off to consider a chime-in; otherwise she just listens.
         if USE_SUBCONSCIOUS:
             subconscious.end_listening()   # stop drafting; this wasn't for her to answer now
         if LOG_HEARD:
