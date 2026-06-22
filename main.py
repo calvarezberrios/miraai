@@ -390,6 +390,36 @@ def on_event(ev):
         handle_message(ev)
 
 
+def _warm_voice():
+    """Fully load the TTS at startup with a live progress indicator, so her first spoken
+    line is instant instead of paying the cold voice-load (and first-run weight download).
+    Blocks until the voice is hot, printing a spinner + the current stage, then confirms."""
+    state = {"stage": "starting voice engine", "done": False, "ok": False}
+
+    def progress(stage):
+        state["stage"] = stage
+
+    def run():
+        state["ok"] = bool(brocas_area.warmup(progress=progress, blocking=True))
+        state["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    frames = "|/-\\"
+    i = 0
+    t0 = time.time()
+    while not state["done"]:
+        el = int(time.time() - t0)
+        line = f"[voice] {frames[i % 4]} {state['stage']}... ({el}s)"
+        print("\r" + line + " " * 8, end="", flush=True)
+        i += 1
+        time.sleep(0.15)
+    el = int(time.time() - t0)
+    if state["ok"]:
+        print("\r[voice] ✓ voice ready in {}s — you can talk now.{}".format(el, " " * 20))
+    else:
+        print("\r[voice] voice warmup didn't complete; she'll load it on first reply.{}".format(" " * 8))
+
+
 try:
     if _startup_last_active is not None:
         away = max(0.0, time.time() - _startup_last_active)
@@ -407,10 +437,11 @@ try:
         print(f"[avatar not available: {e}]\n")
 
     adapter.start(on_event)
-    adapter.warmup()    # heat up TTS so her first real reply is fast
-    # Heat the LLM too: on a CPU-expert model (turbo) the first persona prefill is a ~2 min
-    # cold cost — do it in the background now so the user's first turn is warm.
+    # Heat the LLM in the background (turbo's first persona prefill is a ~2 min cold cost).
     threading.Thread(target=prefrontal_cortex.warmup, daemon=True).start()
+    # Fully warm the TTS up front, with a progress indicator + "voice ready" confirmation,
+    # so her first spoken line is instant instead of a long cold load.
+    _warm_voice()
 
     # Bring her subconscious online (only with --subconscious): it listens to everything
     # she overhears, decides when to chime in, and lets her mind wander when it's quiet.

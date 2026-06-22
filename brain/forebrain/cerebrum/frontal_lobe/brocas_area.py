@@ -590,18 +590,46 @@ def say(text):
         _synth_q.put((sentence, True))
 
 
-def warmup():
-    """Heat the active engine so the first real reply is fast."""
-    if ENGINE == "kokoro":
-        threading.Thread(target=_ensure_kokoro_server, daemon=True).start()
-        return
-    if ENGINE == "gptsovits":
-        _synth_q.put(("Warming up.", False))   # one throwaway synth warms the server
-        return
-    # piper: preload the voice (and the RVC server if enabled)
-    threading.Thread(target=_ensure_piper_loaded, daemon=True).start()
-    if USE_RVC:
-        threading.Thread(target=_ensure_rvc_server, daemon=True).start()
+def warmup(progress=None, blocking=False):
+    """FULLY heat the active TTS so her first spoken line is instant: start the engine AND
+    run one throwaway synthesis — that first synth is what loads the voice and runs the
+    first (slow) forward pass, and on a fresh machine it also downloads the weights. Doing
+    it now means the first REAL line doesn't pay that cost.
+
+    `progress(stage:str)` is called with short status strings (for a startup indicator);
+    defaults to print. Runs in a background thread unless blocking=True; returns True/False
+    (warmed ok) when blocking, else None."""
+    def _log(stage):
+        (progress or print)(stage)
+
+    def _warm():
+        try:
+            if ENGINE == "kokoro":
+                _log("starting Kokoro voice engine")
+                if _ensure_kokoro_server() is None:
+                    _log("failed to start Kokoro"); return False
+                _log("loading voice model (first run downloads weights)")
+                ok = _synth_kokoro("Voice check, one two.") is not None
+            elif ENGINE == "gptsovits":
+                _log("warming GPT-SoVITS server")
+                ok = _synthesize("Voice check.") is not None
+            else:  # piper (+ optional RVC)
+                _log("loading Piper voice")
+                _ensure_piper_loaded()
+                if USE_RVC:
+                    _log("starting RVC voice conversion")
+                    _ensure_rvc_server()
+                ok = _synth_piper("Voice check.") is not None
+            _log("ready" if ok else "warmup synth failed")
+            return ok
+        except Exception as e:
+            _log(f"warmup error: {e}")
+            return False
+
+    if blocking:
+        return _warm()
+    threading.Thread(target=_warm, daemon=True).start()
+    return None
 
 
 def wait_until_done():
