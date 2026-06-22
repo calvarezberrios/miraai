@@ -10,7 +10,12 @@ REM memory embeddings -> PC's Ollama nomic-embed-text (:11434), NOT the turbo se
 set MIRA_EMBED_BASE_URL=http://%PC_IP%:11434/v1
 set MIRA_MODEL=turbo
 set MIRA_NO_THINK=1
-REM laptop has a free 8GB NVIDIA GPU now (no local LLM) -> Whisper on CUDA, fast STT
+REM laptop has a free 8GB NVIDIA GPU now (no local LLM) -> Whisper on CUDA, fast STT.
+REM float16 is faster + more accurate than int8 on a modern GPU (int8 was an old-PC
+REM workaround). small.en is the English-only model: faster and more accurate than "small"
+REM for English. For even faster STT use base.en (a bit less accurate); if fp16 errors on
+REM your GPU, set WHISPER_COMPUTE_TYPE=int8_float16.
 set WHISPER_DEVICE=cuda
-set WHISPER_MODEL_SIZE=small
+set WHISPER_MODEL_SIZE=small.en
+set WHISPER_COMPUTE_TYPE=float16
 python main.py
