@@ -116,6 +116,16 @@ def _humanize_gap(seconds):
     return f"about {days} day{'s' if days != 1 else ''} ago"
 
 
+def _vc_human_count(event):
+    """How many non-bot humans are in the event's voice channel (0 if not a VC event).
+    For discord_voice events, event.raw is the discord VoiceChannel, whose .members lists
+    everyone currently in it; we exclude Mira (the bot)."""
+    members = getattr(getattr(event, "raw", None), "members", None)
+    if not members:
+        return 0
+    return sum(1 for m in members if not getattr(m, "bot", False))
+
+
 def describe_situation(event, prev_seen, now):
     """A short note about WHEN and WHERE this is happening, for the prompt."""
     parts = []
@@ -130,6 +140,20 @@ def describe_situation(event, prev_seen, now):
             "This is a private one-on-one conversation (a direct message). No one "
             "else can see it, so do not act as if there is an audience or public chat watching."
         )
+    elif event.channel == "discord_voice":
+        humans = _vc_human_count(event)
+        if humans <= 1:
+            parts.append(
+                "You're in a voice call with just one person, and they are talking directly "
+                "to you. Respond to them."
+            )
+        else:
+            parts.append(
+                f"You're in a voice call with {humans} people. Not everything said is aimed "
+                "at you — some of it is people talking to each other. Only jump in if it's a "
+                "general topic for the group or it clearly involves you; otherwise stay out "
+                "of their side conversation."
+            )
     elif str(event.channel).startswith("discord"):
         parts.append(
             "This is a public server channel where other people can see the "
@@ -280,6 +304,12 @@ def handle_message(event, interrupting=False):
             channel=chan_key,
         )
         addressed = decision.respond and decision.reason == "addressed"
+
+    # A 1-on-1 voice call (just her and one other person) means that person is talking TO
+    # her -> always respond, like the local mic, no chime-in deliberation. A group VC stays
+    # in chime-in mode (the else branch), where she decides per the situation.
+    if event.channel == "discord_voice" and _vc_human_count(event) <= 1:
+        addressed = True
 
     if interrupting or addressed:
         # Directly addressed -> she answers now, thinking fresh and grounded in this
