@@ -43,7 +43,7 @@ from typing import Callable, List, Optional
 
 from brain.forebrain.subcortical_structures import thalamus
 from brain.forebrain.subcortical_structures.limbic_system import amygdala
-from brain.forebrain.subcortical_structures.limbic_system.hippocampus import recall
+from brain.forebrain.subcortical_structures.limbic_system.hippocampus import recall, recall_document
 from brain.forebrain.cerebrum.frontal_lobe import prefrontal_cortex
 from brain.forebrain.cerebrum.cingulate_cortex import subconscious_log
 
@@ -319,12 +319,13 @@ def _produce_draft(partial: str) -> str:
                 memories.append(m)
     speaker_known = bool(ident_speaker) and any(
         ident_speaker.lower() in m.lower() for m in memories)
+    documents = [f"[{r['name']}] {r['text']}" for r in recall_document(partial)]
     if _session_recap:
         memories = [f"From our last session: {_session_recap}"] + memories
     return prefrontal_cortex.think(
         provisional, amygdala.color(), memories, _situation(listening=True),
         inner_thoughts=recent_thoughts(partial), model=DRAFT_MODEL,
-        speaker=ident_speaker, speaker_known=speaker_known,
+        speaker=ident_speaker, speaker_known=speaker_known, documents=documents,
     )
 
 

@@ -66,6 +66,17 @@ ONLY_CHANNELS = set()
 JOIN_COMMANDS = {"mira join", "mira, join", "!join", "mira come here"}
 LEAVE_COMMANDS = {"mira leave", "mira, leave", "!leave", "mira go away"}
 
+# "what reference documents / games have I given you" phrases
+DOC_LIST_COMMANDS = {"mira what games do you know", "mira what games", "mira list games",
+                     "mira games", "what games do you know", "mira what documents do you have"}
+
+
+def _is_pdf(attachment) -> bool:
+    """True if a Discord attachment looks like a PDF (by content-type or filename)."""
+    ct = (getattr(attachment, "content_type", None) or "").lower()
+    fn = (getattr(attachment, "filename", None) or "").lower()
+    return ct.startswith("application/pdf") or fn.endswith(".pdf")
+
 # ----------------------------------------------------------------------------
 # Voice endpointing — mirrors the local mic path (wernickes_area) 1:1.
 # A per-speaker buffer is advanced every VOICE_BLOCK_SEC by either arrived audio
@@ -243,12 +254,20 @@ class DiscordAdapter(IOAdapter):
             async def on_message(message):
                 if message.author == client.user or message.author.bot:
                     return
+                # remember where to post non-voice notices (note-taking / document confirmations)
+                self._last_text_channel = message.channel
+
+                # PDF upload -> ingest as reference material (e.g. a game rulebook). Handled BEFORE
+                # the empty-content guard, since a PDF usually arrives with no message text.
+                pdfs = [a for a in message.attachments if _is_pdf(a)]
+                if pdfs:
+                    for a in pdfs:
+                        await self._ingest_attachment(message, a)
+                    return
+
                 content = (message.clean_content or "").strip()
                 if not content:
                     return
-
-                # remember where to post non-voice notices (note-taking confirmations/recaps)
-                self._last_text_channel = message.channel
 
                 low = content.lower()
                 if low in JOIN_COMMANDS:
@@ -256,6 +275,12 @@ class DiscordAdapter(IOAdapter):
                     return
                 if low in LEAVE_COMMANDS:
                     await self._leave(message)
+                    return
+                if low in DOC_LIST_COMMANDS:
+                    await self._list_documents_reply(message)
+                    return
+                if low.startswith("mira forget "):
+                    await self._forget_document_reply(message, content[len("mira forget "):].strip())
                     return
 
                 is_dm = message.guild is None
@@ -776,7 +801,10 @@ class DiscordAdapter(IOAdapter):
                     if not text:
                         continue
                     speaker = getattr(member, "display_name", None) or str(member)
-                    print(f"[voice] {speaker}: {text}")
+                    # NOTE: don't print the heard line here — the brain prints it once when it
+                    # commits the turn (the [mic] live caption settles into "Speaker: text" before
+                    # her reply, or a "[heard]" line if she stays quiet), so this avoids showing the
+                    # same utterance two or three times.
                     vc_channel = self._voice_client.channel if self._voice_client else None
                     self._current_target = ("voice", None)
                     # Voice is NOT auto-addressed. handle_message runs a chime-in decision on
@@ -812,6 +840,97 @@ class DiscordAdapter(IOAdapter):
             asyncio.run_coroutine_threadsafe(ch.send(text[:2000]), self._loop)
         except Exception as e:
             print(f"[Discord] notify failed: {e}")
+
+    # ---------------- reference documents (PDF rulebooks etc.) ----------------
+    def _post(self, channel, text: str) -> None:
+        """Send a message to a channel from ANY thread (the PDF ingest runs on a worker)."""
+        if not text:
+            return
+        if channel is None or self._loop is None:
+            print(text)
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(channel.send(text[:2000]), self._loop)
+        except Exception as e:
+            print(f"[Discord] post failed: {e}\n{text}")
+
+    @staticmethod
+    def _doc_name_from(content: str, filename: str) -> str:
+        """Name the document: the message text if the user gave a short label, else the filename."""
+        c = (content or "").strip()
+        low = c.lower()
+        if c and len(c) <= 60 and not low.startswith(("mira read", "read this", "mira learn", "mira load")):
+            return c
+        stem = os.path.splitext(os.path.basename(filename or "document"))[0]
+        return (stem.replace("_", " ").replace("-", " ").strip() or "document")[:60]
+
+    async def _ingest_attachment(self, message, attachment) -> None:
+        """Download a PDF attachment and kick off background extraction + embedding."""
+        name = self._doc_name_from(getattr(message, "clean_content", ""), attachment.filename)
+        try:
+            data = await attachment.read()
+        except Exception as e:
+            await message.channel.send(f"couldn't download `{attachment.filename}`: {e}")
+            return
+        await message.channel.send(f"📄 reading **{name}**… give me a sec.")
+        # Extraction + chunk + embed is slow and blocking — do it off the event loop.
+        threading.Thread(
+            target=self._ingest_pdf,
+            args=(name, data, attachment.filename, message.channel),
+            daemon=True,
+        ).start()
+
+    def _ingest_pdf(self, name, data, filename, channel) -> None:
+        """[worker thread] Extract PDF text and store it as a chunked, embedded document."""
+        try:
+            import io as _io
+            from pypdf import PdfReader
+            reader = PdfReader(_io.BytesIO(data))
+            pages = len(reader.pages)
+            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+        except Exception as e:
+            self._post(channel, f"⚠️ couldn't read `{filename}`: {e}")
+            return
+        words = len(text.split())
+        if words < 20:
+            self._post(channel, f"⚠️ I got almost no text out of **{name}** ({words} words). "
+                                f"If it's a scanned PDF (images of pages), I can't read it — "
+                                f"I need a text/OCR'd PDF.")
+            return
+        try:
+            from brain.forebrain.subcortical_structures.limbic_system import hippocampus
+            n = hippocampus.remember_document(name, text)
+        except Exception as e:
+            self._post(channel, f"⚠️ couldn't store **{name}**: {e}")
+            return
+        if n:
+            self._post(channel, f"✅ Read **{name}** — {pages} pages, {words:,} words, {n} chunks "
+                                f"stored. Ask me anything about it. (`mira forget {name}` to remove.)")
+        else:
+            self._post(channel, f"⚠️ Couldn't store **{name}** — is the embedding server reachable?")
+
+    async def _list_documents_reply(self, message) -> None:
+        try:
+            from brain.forebrain.subcortical_structures.limbic_system import hippocampus
+            games = hippocampus.list_documents()
+        except Exception as e:
+            await message.channel.send(f"(couldn't check: {e})")
+            return
+        if games:
+            await message.channel.send(
+                "I've read: " + ", ".join(f"**{k}** ({v} chunks)" for k, v in games.items()))
+        else:
+            await message.channel.send("I haven't been given any documents yet — attach a PDF and I'll read it.")
+
+    async def _forget_document_reply(self, message, name) -> None:
+        try:
+            from brain.forebrain.subcortical_structures.limbic_system import hippocampus
+            ok = hippocampus.forget_document(name)
+        except Exception as e:
+            await message.channel.send(f"(couldn't forget: {e})")
+            return
+        await message.channel.send(f"Forgot **{name}**." if ok
+                                   else f"I don't have a document called **{name}**.")
 
     def _speak_text(self, text, channel):
         if not text or channel is None or self._loop is None:

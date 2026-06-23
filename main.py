@@ -32,6 +32,7 @@ from brain.forebrain.subcortical_structures.limbic_system.amygdala import feel, 
 import brain.forebrain.subcortical_structures.limbic_system.amygdala as amygdala
 from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
     recall, observe, consolidate, summarize_session, last_session,
+    recall_document, remember_document, list_documents, forget_document,
 )
 from brain.forebrain.subcortical_structures.basal_ganglia.action_selector import (
     should_respond, mark_engaged,
@@ -278,7 +279,8 @@ def _recall_for(event):
     recognizes them. Recalling on the speaker's name (not just the text) is what surfaces a
     stored identity fact ("Discord user X is GameRaiderX") whenever that person talks, even on an
     unrelated line. Identity gating only applies to Discord speakers; locally the speaker is the
-    owner ("You"), so we skip it. Returns (memories, ident_speaker, speaker_known)."""
+    owner ("You"), so we skip it. Also pulls relevant excerpts from any loaded reference document
+    (e.g. a game rulebook). Returns (memories, ident_speaker, speaker_known, documents)."""
     memories = recall(event.text)
     ident_speaker = event.speaker if str(event.channel).startswith("discord") else None
     if ident_speaker:
@@ -288,7 +290,9 @@ def _recall_for(event):
                 memories.append(m)
     speaker_known = bool(ident_speaker) and any(
         ident_speaker.lower() in m.lower() for m in memories)
-    return memories, ident_speaker, speaker_known
+    # reference-document excerpts relevant to this message (rulebooks etc.), labeled by source
+    documents = [f"[{r['name']}] {r['text']}" for r in recall_document(event.text)]
+    return memories, ident_speaker, speaker_known, documents
 
 
 def handle_message(event, interrupting=False):
@@ -341,6 +345,18 @@ def handle_message(event, interrupting=False):
     if event.channel == "discord_voice" and _vc_human_count(event) <= 1:
         addressed = True
 
+    # Conversation continuity (text / DM / local): a follow-up WITHOUT her name, while a
+    # conversation she's already in is still live in THIS channel, should keep going — she
+    # shouldn't need to be re-@'d or re-named on every message. should_respond returns
+    # reason="consider" for exactly that (she spoke here within ACTIVE_WINDOW_SEC). A cheap
+    # YES/NO relevance check confirms the message actually continues the thread (so she doesn't
+    # grab unrelated chatter in a busy channel), then she answers it like an addressed turn.
+    # (Voice has its own chime-in path below.)
+    if (not interrupting and not addressed and event.channel != "discord_voice"
+            and decision.reason == "consider"
+            and prefrontal_cortex.judge_relevance(context)):
+        addressed = True
+
     if interrupting or addressed:
         # Directly addressed -> she answers now, thinking fresh and grounded in this
         # session + her recalled memories. (With --subconscious she may instead reuse a
@@ -356,7 +372,7 @@ def handle_message(event, interrupting=False):
                 inner_thoughts = subconscious.recent_thoughts(event.text)
 
         if not reply:
-            memories, ident_speaker, speaker_known = _recall_for(event)
+            memories, ident_speaker, speaker_known, documents = _recall_for(event)
             if previous_session:
                 memories = [f"From our last session: {previous_session}"] + memories
             flavor = color() + (INTERRUPT_NOTE if interrupting else "")
@@ -365,7 +381,8 @@ def handle_message(event, interrupting=False):
             # still being written (the big win for longer rants).
             reply = think_stream(context, flavor, memories, situation=situation,
                                  inner_thoughts=inner_thoughts,
-                                 speaker=ident_speaker, speaker_known=speaker_known)
+                                 speaker=ident_speaker, speaker_known=speaker_known,
+                                 documents=documents)
 
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
@@ -374,13 +391,13 @@ def handle_message(event, interrupting=False):
         # named, so SHE decides whether to chime in on what was said — joining if it's
         # relevant or about her, staying quiet otherwise. One call both decides and writes
         # the line (returns "" to stay silent).
-        memories, ident_speaker, speaker_known = _recall_for(event)
+        memories, ident_speaker, speaker_known, documents = _recall_for(event)
         if previous_session:
             memories = [f"From our last session: {previous_session}"] + memories
         situation = describe_situation(event, prev_seen, now)
         line = prefrontal_cortex.consider_speaking(
             context, color(), memories, situation=situation,
-            speaker=ident_speaker, speaker_known=speaker_known)
+            speaker=ident_speaker, speaker_known=speaker_known, documents=documents)
         if line:
             speak_reply(line, user_text=event.text, channel=chan_key,
                         speaker=event.speaker, source="chime-in")
@@ -418,9 +435,21 @@ def on_event(ev):
         if DRAFTING and not scribe.is_active():
             subconscious.observe_partial(ev.text or "", channel=ev.channel, speaker=ev.speaker)
     elif ev.kind == INTERRUPT:
+        _clear_mic_line()
         handle_message(ev, interrupting=True)
     else:  # FINAL
+        # The utterance is done: wipe the rolling [mic] caption so the committed turn
+        # ("Speaker: text" + her reply, or a "[heard]" line) replaces it in place, instead
+        # of the same transcript showing again underneath it.
+        _clear_mic_line()
         handle_message(ev)
+
+
+def _clear_mic_line():
+    """Erase the in-place [mic] live-caption line (no-op-safe if there isn't one — it just
+    blanks the current empty console line, e.g. in Discord-text mode)."""
+    cols = shutil.get_terminal_size((100, 20)).columns
+    print("\r" + " " * (cols - 1) + "\r", end="", flush=True)
 
 
 def _warm_voice():

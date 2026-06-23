@@ -122,3 +122,16 @@ Then use that repo URL in section B.2.
   path; this gives you the local 35B without the crashes.
 - **Network:** keep both on the same LAN (wired PC + Wi-Fi laptop is fine). Round-trip is
   negligible next to generation time.
+
+## Where the work runs (and why the laptop GPU "looks idle")
+- **Thinking = the desktop.** The LLM runs on the desktop PC, so while Mira "thinks" the **laptop's
+  NVIDIA GPU is correctly at 0%** — the laptop just sends a LAN request and waits. Watch the
+  *desktop's* GPU/CPU during thinking, and the laptop's *network* tab.
+- **Listening (Whisper) + speaking (Kokoro) = the laptop NVIDIA GPU.** Verified: loading Whisper
+  uses ~2 GB VRAM and transcription hits ~100% GPU-util; Kokoro loads on `cuda:0`.
+- **Task Manager hides this.** CUDA compute shows under the **"Cuda"** engine, which Task Manager's
+  GPU graphs DON'T show by default (they show 3D/Copy/Video → read ~0). To see it: Performance →
+  GPU (NVIDIA) → change a graph's dropdown to **"Cuda"**, and watch **Dedicated GPU memory**. The
+  work is also short/bursty (STT fires ~0.3-0.5s when you stop talking), so it spikes, not sustains.
+  The **Intel UHD** usage you see is just the display/compositor + the avatar browser window.
+- **Easiest way to actually watch it:** `nvidia-smi -l 1` in a laptop terminal while you talk.

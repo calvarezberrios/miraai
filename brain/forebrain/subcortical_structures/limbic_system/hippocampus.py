@@ -46,6 +46,10 @@ EMBED_MODEL = "nomic-embed-text"
 # On-disk store -- survives restarts. Folder is created on first run.
 _db = chromadb.PersistentClient(path="./memory_store")
 _collection = _db.get_or_create_collection(name="mira_memory")
+# Separate store for reference DOCUMENTS she's been given (e.g. a game rulebook PDF). Kept apart
+# from episodic memory so rulebook chunks don't bleed into normal recall — they only surface when a
+# message is actually about that material. Persists across sessions like the rest of the store.
+_docs = _db.get_or_create_collection(name="mira_documents")
 
 
 def _embed(text):
@@ -223,3 +227,93 @@ def last_session():
     metas = got.get("metadatas") or [{}] * len(docs)
     newest = max(zip(docs, metas), key=lambda dm: (dm[1] or {}).get("ts", 0))
     return newest[0]
+
+
+# --- reference documents (e.g. a game rulebook PDF) — chunked + RAG-retrieved ----------
+# She can't fit a whole rulebook in the local model's ~8k context, so we chunk it, embed each
+# chunk, and pull only the relevant pieces into context when a message is actually about it.
+
+_DOC_CHUNK_WORDS = int(os.environ.get("MIRA_DOC_CHUNK_WORDS", "280"))   # ~chunk size in words
+_DOC_CHUNK_OVERLAP = int(os.environ.get("MIRA_DOC_OVERLAP", "40"))      # words shared between chunks
+# Documents are reference material, not chit-chat, so a slightly more permissive recall bar than
+# episodic memory's 0.85 — a paraphrased question ("how do I attack") should still pull the rule.
+_DOC_RECALL_MAX_DISTANCE = float(os.environ.get("MIRA_DOC_RECALL_MAX_DISTANCE", "1.05"))
+
+
+def _chunk_text(text, size=None, overlap=None):
+    """Split a long document into overlapping word-windows for embedding."""
+    size = size or _DOC_CHUNK_WORDS
+    overlap = overlap if overlap is not None else _DOC_CHUNK_OVERLAP
+    words = (text or "").split()
+    if not words:
+        return []
+    step = max(1, size - overlap)
+    return [" ".join(words[i:i + size]) for i in range(0, len(words), step)]
+
+
+def remember_document(name, text):
+    """Store a reference document under `name` (chunked + embedded). Replaces any existing doc
+    with the same name. Returns the number of chunks stored (0 if nothing usable / embed down)."""
+    name = (name or "document").strip()
+    forget_document(name)                      # replace, don't duplicate, on re-upload
+    chunks = _chunk_text(text)
+    if not chunks:
+        return 0
+    ids, embs, docs, metas = [], [], [], []
+    for i, chunk in enumerate(chunks):
+        try:
+            emb = _embed(chunk)
+        except Exception as e:
+            print(f"[hippocampus] embed unavailable — document not stored: {e}")
+            return 0
+        ids.append(str(uuid.uuid4()))
+        embs.append(emb)
+        docs.append(chunk)
+        metas.append({"kind": "document", "name": name, "chunk": i, "ts": time.time()})
+    _docs.add(ids=ids, embeddings=embs, documents=docs, metadatas=metas)
+    return len(chunks)
+
+
+def recall_document(query, n=3, max_distance=None):
+    """Retrieve the document chunks most relevant to `query` (across all loaded documents).
+    Returns a list of {"name", "text"}; empty if nothing clears the bar or the embedder is down."""
+    if _docs.count() == 0:
+        return []
+    try:
+        q = _embed(query)
+    except Exception as e:
+        print(f"[hippocampus] embed unavailable — no document recall: {e}")
+        return []
+    res = _docs.query(query_embeddings=[q], n_results=min(n, _docs.count()),
+                      include=["documents", "metadatas", "distances"])
+    docs = res["documents"][0]
+    metas = res["metadatas"][0]
+    dists = res["distances"][0]
+    bar = _DOC_RECALL_MAX_DISTANCE if max_distance is None else max_distance
+    out = []
+    for d, m, dist in zip(docs, metas, dists):
+        if dist <= bar:
+            out.append({"name": (m or {}).get("name", "document"), "text": d})
+    return out
+
+
+def list_documents():
+    """Names of the documents she currently has loaded (with chunk counts)."""
+    got = _docs.get(include=["metadatas"])
+    counts = {}
+    for m in got.get("metadatas") or []:
+        counts[(m or {}).get("name", "document")] = counts.get((m or {}).get("name", "document"), 0) + 1
+    return counts
+
+
+def forget_document(name):
+    """Remove all chunks of the named document. Returns True if anything was deleted."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    existing = _docs.get(where={"name": name})
+    ids = existing.get("ids") or []
+    if not ids:
+        return False
+    _docs.delete(ids=ids)
+    return True

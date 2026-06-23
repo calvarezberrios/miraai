@@ -251,6 +251,20 @@ and RVC, if the Piper engine is enabled, is launched automatically as a subproce
   an unfamiliar name as someone new until told who they are ("I'm GameRaiderX" is remembered across
   sessions). Needs Server Members Intent (above).
 
+- **Conversation continuity (text):** after she replies in a text channel, your follow-ups for the
+  next few minutes **don't need her name/@** — she keeps the thread going if the message is on-topic
+  (a quick relevance check), and ignores unrelated cross-talk. DMs are always answered. Window is
+  `ACTIVE_WINDOW_SEC` in `action_selector.py`.
+
+- **Giving her a document to read (PDF, e.g. a game rulebook):** just **attach a PDF** in a Discord
+  channel/DM (optionally with a short label as the message, e.g. "Catan"). She extracts the text,
+  chunks + embeds it into her memory, and confirms (pages/words/chunks). The local model's context
+  is small (~8k tokens), so she can't hold a whole book at once — instead the **relevant rules are
+  retrieved into context when you ask** (RAG), and she quotes/applies them precisely. It **persists
+  across sessions**. Manage with `mira what games do you know` (list) and `mira forget <name>`
+  (remove). Needs the desktop embedding server (memory) reachable. *Text PDFs only — a scanned
+  (image) PDF has no extractable text; she'll say so.* Needs `pypdf` (in `requirements.txt`).
+
 First run downloads the Whisper model (one-time).
 
 ### Note-taking

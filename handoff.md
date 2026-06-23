@@ -49,6 +49,21 @@ mode with **`start_discord.bat`** (sets the LAN endpoints + `--discord --draft`)
   `start_discord.bat`) and `subconscious.start(draft_only=True)`: she pre-drafts a reply *while you
   talk* (identity-aware) and answers the instant you stop, WITHOUT the full subconscious's chime-ins
   or daydreams. `--subconscious` still enables the whole background mind.
+- **Text-chat conversation continuity (NEW).** Discord text follow-ups WITHOUT her name now continue
+  an active conversation: `main.py` acts on `should_respond`'s `reason="consider"` tier via
+  `judge_relevance` (non-voice channels). Also fixed `judge_relevance()` to pass the no-think flag
+  (was empty→always-NO on turbo, like the `_digest` bug).
+- **PDF documents / RAG (NEW).** Attach a PDF in Discord (e.g. a game rulebook) → `discord_adapter`
+  (`_ingest_pdf`, `pypdf`) extracts text → `hippocampus.remember_document(name, text)` chunks +
+  embeds it into a SEPARATE `mira_documents` Chroma collection (persists). On each turn
+  `main.py._recall_for` (and the drafter) also `recall_document(text)`; relevant excerpts go into a
+  dedicated "reference material — quote precisely" block in `_build_system` (new `documents=` param
+  on `think`/`think_stream`/`consider_speaking`). Commands: `mira what games do you know`,
+  `mira forget <name>`. Local model is ~8k ctx (Qwen3.6-35B-A3B, text-only) so it RAGs, can't hold a
+  whole book; needs the desktop embedder. Text PDFs only (no OCR).
+- **Console de-dup.** A voice utterance printed 3× (`[mic]` live, `[voice]`, then again before her
+  reply). Removed the `[voice]` line and now `_clear_mic_line()` wipes the rolling `[mic]` caption on
+  finalize so it settles into one committed "Speaker: text" line.
 
 ---
 

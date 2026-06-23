@@ -47,6 +47,9 @@ piper-tts              # neural TTS (female voice); runs inline in the main proc
                        # RVC voice-conversion (optional) runs in the GPT-SoVITS runtime via
                        # rvc_python — see the GPT-SoVITS note above; nothing to add here.
 
+# --- documents (PDF rulebooks etc. she can read via RAG) ---
+pypdf                  # extract text from an attached PDF -> chunked + embedded into memory
+
 # --- speech-to-text ---
 faster-whisper         # Whisper STT (CTranslate2 backend)
 

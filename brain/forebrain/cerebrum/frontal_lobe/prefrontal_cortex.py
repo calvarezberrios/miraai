@@ -135,8 +135,9 @@ def _identity_block(speaker: str, speaker_known: bool) -> str:
 
 
 def _build_system(mood_flavor: str = "", memories=None, situation: str = "",
-                  inner_thoughts=None, speaker: str = None, speaker_known: bool = False) -> str:
-    """Persona + live context (situation, mood, daydreams, memories), shared by
+                  inner_thoughts=None, speaker: str = None, speaker_known: bool = False,
+                  documents=None) -> str:
+    """Persona + live context (situation, mood, daydreams, memories, reference docs), shared by
     think() and consider_speaking() so both reason from the same self/context."""
     system_content = PERSONA
     system_content += _identity_block(speaker, speaker_known)
@@ -157,6 +158,14 @@ def _build_system(mood_flavor: str = "", memories=None, situation: str = "",
             "\n\nThings you remember from past conversations (these are YOUR own memories of "
             "other people and events - weave them in naturally only if relevant, don't recite "
             "them, and always speak about yourself in the first person):\n" + recalled
+        )
+    if documents:
+        refs = "\n".join(f"- {d}" for d in documents)
+        system_content += (
+            "\n\nReference material you've been given (e.g. a game rulebook). UNLIKE your loose "
+            "memories above, use these passages PRECISELY: quote or apply the rules and values "
+            "exactly as written, and don't invent rules that aren't here. If something isn't "
+            "covered, say so instead of making it up. Relevant excerpts:\n" + refs
         )
     return system_content
 
@@ -203,12 +212,13 @@ def _sanitize(text: str) -> str:
 
 def think(history: list[dict], mood_flavor: str = "", memories = None, situation: str = "",
           inner_thoughts = None, model: str = None, speaker: str = None,
-          speaker_known: bool = False) -> str:
+          speaker_known: bool = False, documents=None) -> str:
     """Generate a reply. Used when Mira is directly addressed (or interrupting) -
     she always says something here. `model` overrides the default (the subconscious
     can draft replies-in-advance on a faster model so they keep pace with speech)."""
     system_content = _build_system(mood_flavor, memories, situation, inner_thoughts,
-                                   speaker=speaker, speaker_known=speaker_known)
+                                   speaker=speaker, speaker_known=speaker_known,
+                                   documents=documents)
     response = client.chat.completions.create(
         model=model or MODEL,
         messages=[
@@ -318,12 +328,13 @@ def _stream_sentences(deltas):
 
 def think_stream(history: list[dict], mood_flavor: str = "", memories=None,
                  situation: str = "", inner_thoughts=None, model: str = None,
-                 speaker: str = None, speaker_known: bool = False):
+                 speaker: str = None, speaker_known: bool = False, documents=None):
     """Streaming twin of think(): yields Mira's reply one sentence at a time as the model
     writes it, so her voice can start on sentence 1 while later sentences are still being
     generated. Same persona/context and same output hygiene as think()."""
     system_content = _build_system(mood_flavor, memories, situation, inner_thoughts,
-                                   speaker=speaker, speaker_known=speaker_known)
+                                   speaker=speaker, speaker_known=speaker_known,
+                                   documents=documents)
     stream = client.chat.completions.create(
         model=model or MODEL,
         messages=[
@@ -366,7 +377,7 @@ QUIET_TOKEN = "[QUIET]"
 
 def consider_speaking(history: list[dict], mood_flavor: str = "", memories = None,
                       situation: str = "", inner_thoughts = None, speaker: str = None,
-                      speaker_known: bool = False) -> str:
+                      speaker_known: bool = False, documents=None) -> str:
     """Autonomous floor decision for conversation Mira was NOT directly addressed in.
 
     She hears everything; this is where she decides whether to jump in. A single
@@ -375,7 +386,8 @@ def consider_speaking(history: list[dict], mood_flavor: str = "", memories = Non
     wallflower) but isn't required to answer every line. Returns "" when she stays quiet.
     """
     system_content = _build_system(mood_flavor, memories, situation, inner_thoughts,
-                                   speaker=speaker, speaker_known=speaker_known)
+                                   speaker=speaker, speaker_known=speaker_known,
+                                   documents=documents)
     system_content += (
         "\n\nYou are following a live conversation you were not directly addressed in. "
         "Decide whether to jump in right now. You are chatty and love being part of things, "
@@ -450,10 +462,11 @@ def judge_relevance(history: list[dict]) -> bool:
                 {"role": "system", "content": judge_system},
                 {"role": "user", "content": f"{transcript}\n\nShould Mira reply? YES or NO."},
             ],
-            max_tokens=2,
+            max_tokens=4,
             temperature=0.0,
+            extra_body=_EXTRA,  # disable reasoning (turbo) — else it burns the budget on <think> -> empty -> always NO
         )
-        answer = response.choices[0].message.content.strip().upper()
+        answer = (response.choices[0].message.content or "").strip().upper()
         return answer.startswith("Y")
     except Exception:
         return False
