@@ -42,16 +42,19 @@ from faster_whisper.vad import VadOptions, get_speech_timestamps
 SAMPLE_RATE = 16000
 BLOCK_SEC = 0.05            # mic callback chunk size
 REFRESH_SEC = 0.7           # how often live partials update
-# Trailing silence that ends an utterance. 3.0 was very laggy (3s dead air before she even
-# starts thinking); 1.2 feels responsive. Tune with MIRA_END_SILENCE_SEC — raise it if she
-# cuts you off when you pause mid-thought, lower it for snappier turn-taking.
-END_SILENCE_SEC = float(os.environ.get("MIRA_END_SILENCE_SEC", "1.2"))
+# Trailing silence that ends an utterance. 2.25s tolerates mid-thought pauses without
+# cutting you off mid-sentence (the prior 1.2s would finalize during natural pauses, then
+# send the rest as a second turn after she'd already replied). Tune with MIRA_END_SILENCE_SEC
+# — lower it for snappier turn-taking, raise it if she still cuts you off.
+END_SILENCE_SEC = float(os.environ.get("MIRA_END_SILENCE_SEC", "2.25"))
 INTERRUPT_AFTER_SEC = 25.0  # monologue length that lets Mira interrupt
-# On a roomy GPU bump these via env: MODEL_SIZE=medium/large-v3, COMPUTE_TYPE=float16.
-# (The old 1660 Super had a broken fp16 path; int8/small were a VRAM compromise.)
-MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")   # "small" fast; "medium"/"large-v3" more accurate
+# distil-large-v3: distilled large-v3, ~2-3x faster decode at near-identical English accuracy
+# (English-only). large-v3 (~930ms/utterance) overran the 0.7s partial-refresh cadence and
+# backed up, delaying her reply; distil (~340ms) fits under it. Override with WHISPER_MODEL_SIZE
+# (e.g. "large-v3" for max multilingual accuracy, "small"/"medium" for less VRAM).
+MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "distil-large-v3")  # fast + accurate for English
 DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")            # "cpu" if VRAM gets tight
-COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # "float16" on a working-fp16 GPU
+COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")  # RTX 5050 (Blackwell) has a working fp16 path
 INPUT_DEVICE = None         # None = default mic; or device index/name
 LANGUAGE = "en"
 

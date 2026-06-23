@@ -128,6 +128,11 @@ _CONSOLIDATION_PROMPT = (
     "in the third person, so never write a fact whose subject is Mira. "
     "Ignore small talk, jokes, flirting, role/mention tokens like \"@everyone\" or "
     "\"@Mira\", and anything trivial or fleeting. "
+    "IMPORTANT — identities: turns are prefixed with the speaker's display name (\"Name: ...\"). "
+    "If a speaker says who they are, or that their display name belongs to a known person (e.g. a "
+    "user named CoolName123 says \"I'm GameRaiderX\"), record that mapping as a durable fact so "
+    "she recognizes that name next time: \"The Discord user CoolName123 is GameRaiderX, the "
+    "creator.\" Capture the same for anyone identifying themselves. "
     "Write each fact as one short, standalone sentence in the third person (e.g. "
     "\"Sam is learning to play guitar.\"). Use real names, never \"@everyone\". "
     "One fact per line, no numbering or bullets. If nothing is worth remembering, "
@@ -144,11 +149,16 @@ _SESSION_SUMMARY_PROMPT = (
 )
 
 
-def observe(user_message, reply):
-    """Record one exchange into both the consolidation buffer and session log."""
-    _buffer.append({"role": "user", "content": user_message})
+def observe(user_message, reply, speaker=None):
+    """Record one exchange into both the consolidation buffer and session log.
+
+    `speaker` (the Discord display name) is prefixed onto the user turn so the consolidation /
+    session-summary LLM can see WHO said what — that's what lets it learn identity mappings
+    ("CoolName123 is GameRaiderX") and attribute facts to the right person."""
+    user_content = f"{speaker}: {user_message}" if speaker else user_message
+    _buffer.append({"role": "user", "content": user_content})
     _buffer.append({"role": "assistant", "content": reply})
-    _session_log.append({"role": "user", "content": user_message})
+    _session_log.append({"role": "user", "content": user_content})
     _session_log.append({"role": "assistant", "content": reply})
 
 
@@ -164,6 +174,11 @@ def _digest(prompt, log, temperature):
         ],
         max_tokens=200,
         temperature=temperature,
+        # Disable reasoning when MIRA_NO_THINK=1 (no-op otherwise). Without this, a reasoning
+        # model (e.g. the Qwen3 "turbo" build) spends the whole 200-token budget on a <think>
+        # block and returns EMPTY content — so consolidation/session-summary would silently
+        # store nothing. Mirrors think()/think_stream().
+        extra_body=_pfc._EXTRA,
     )
     return resp.choices[0].message.content.strip()
 

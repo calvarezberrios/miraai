@@ -62,12 +62,23 @@ parser.add_argument(
          "mind-wandering. Off by default — the plain path is STT -> Mira -> TTS, where she "
          "replies only when addressed.",
 )
+parser.add_argument(
+    "--draft",
+    action="store_true",
+    help="Pre-draft a reply WHILE you're still talking so she answers the instant you stop "
+         "(faster turns), WITHOUT the full subconscious's chime-ins or mind-wandering. "
+         "Implied by --subconscious.",
+)
 args = parser.parse_args()
 
 # Simplified pipeline by default: speech in -> Mira thinks (grounded in memories + this
 # session) -> speech out, with no background mind. Opt into the full subconscious with
 # --subconscious.
 USE_SUBCONSCIOUS = args.subconscious
+# Pre-drafting (job 1 of the subconscious) — speak faster by having a reply ready the moment
+# you stop. The full subconscious includes this; --draft turns ON just the drafting, with no
+# chime-ins or daydreams.
+DRAFTING = USE_SUBCONSCIOUS or args.draft
 
 if args.discord:
     from peripheral_nervous_system.discord_adapter import DiscordAdapter
@@ -220,11 +231,11 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
                 return
             if not is_daydream:
                 remember_reply(reply)
-                observe(user_text if user_text is not None else "", reply)
+                observe(user_text if user_text is not None else "", reply, speaker=speaker)
         else:
             if not is_daydream:
                 remember_reply(reply)
-                observe(user_text if user_text is not None else "", reply)
+                observe(user_text if user_text is not None else "", reply, speaker=speaker)
 
             if is_daydream:
                 print(f"\nMira (daydream, {amygdala.mood}): {reply}\n")
@@ -262,6 +273,24 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
         last_consolidation = time.time()
 
 
+def _recall_for(event):
+    """Recall memories relevant to the MESSAGE and to WHO is speaking, then decide whether she
+    recognizes them. Recalling on the speaker's name (not just the text) is what surfaces a
+    stored identity fact ("Discord user X is GameRaiderX") whenever that person talks, even on an
+    unrelated line. Identity gating only applies to Discord speakers; locally the speaker is the
+    owner ("You"), so we skip it. Returns (memories, ident_speaker, speaker_known)."""
+    memories = recall(event.text)
+    ident_speaker = event.speaker if str(event.channel).startswith("discord") else None
+    if ident_speaker:
+        # a bare display name lands near the recall distance bar, so query it more leniently
+        for m in recall(ident_speaker, max_distance=1.1):
+            if m not in memories:
+                memories.append(m)
+    speaker_known = bool(ident_speaker) and any(
+        ident_speaker.lower() in m.lower() for m in memories)
+    return memories, ident_speaker, speaker_known
+
+
 def handle_message(event, interrupting=False):
     now = time.time()
 
@@ -274,7 +303,8 @@ def handle_message(event, interrupting=False):
 
     # She follows the whole room: every message updates short-term context,
     # whether or not she ends up replying to it. (The subconscious reads this.)
-    context = receive(event.text)
+    # Tag the turn with WHO said it so multi-speaker context stays attributable.
+    context = receive(event.text, speaker=event.speaker)
 
     chan_key = getattr(event.raw, "id", None)
     chan_key = str(chan_key) if chan_key is not None else event.channel
@@ -317,15 +347,16 @@ def handle_message(event, interrupting=False):
         # reply her background mind already drafted while the person was still talking.)
         reply = None
         inner_thoughts = None
-        if USE_SUBCONSCIOUS:
+        if DRAFTING:
             if addressed and not interrupting:
-                reply = subconscious.take_draft(event.text)
+                reply = subconscious.take_draft(event.text)   # the reply she drafted while you talked
             else:
                 subconscious.end_listening()   # interrupt: don't reuse the draft
-            inner_thoughts = subconscious.recent_thoughts(event.text)
+            if USE_SUBCONSCIOUS:
+                inner_thoughts = subconscious.recent_thoughts(event.text)
 
         if not reply:
-            memories = recall(event.text)
+            memories, ident_speaker, speaker_known = _recall_for(event)
             if previous_session:
                 memories = [f"From our last session: {previous_session}"] + memories
             flavor = color() + (INTERRUPT_NOTE if interrupting else "")
@@ -333,7 +364,8 @@ def handle_message(event, interrupting=False):
             # Stream the fresh reply so her voice starts on sentence 1 while the rest is
             # still being written (the big win for longer rants).
             reply = think_stream(context, flavor, memories, situation=situation,
-                                 inner_thoughts=inner_thoughts)
+                                 inner_thoughts=inner_thoughts,
+                                 speaker=ident_speaker, speaker_known=speaker_known)
 
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
@@ -342,12 +374,13 @@ def handle_message(event, interrupting=False):
         # named, so SHE decides whether to chime in on what was said — joining if it's
         # relevant or about her, staying quiet otherwise. One call both decides and writes
         # the line (returns "" to stay silent).
-        memories = recall(event.text)
+        memories, ident_speaker, speaker_known = _recall_for(event)
         if previous_session:
             memories = [f"From our last session: {previous_session}"] + memories
         situation = describe_situation(event, prev_seen, now)
         line = prefrontal_cortex.consider_speaking(
-            context, color(), memories, situation=situation)
+            context, color(), memories, situation=situation,
+            speaker=ident_speaker, speaker_known=speaker_known)
         if line:
             speak_reply(line, user_text=event.text, channel=chan_key,
                         speaker=event.speaker, source="chime-in")
@@ -382,8 +415,8 @@ def on_event(ev):
         # She listens AND drafts at the same time: each partial refines a reply that
         # will be ready the instant the speaker stops. (Not while taking notes — then
         # she only listens, so there's no draft and the subconscious is paused.)
-        if USE_SUBCONSCIOUS and not scribe.is_active():
-            subconscious.observe_partial(ev.text or "", channel=ev.channel)
+        if DRAFTING and not scribe.is_active():
+            subconscious.observe_partial(ev.text or "", channel=ev.channel, speaker=ev.speaker)
     elif ev.kind == INTERRUPT:
         handle_message(ev, interrupting=True)
     else:  # FINAL
@@ -448,6 +481,10 @@ try:
     if USE_SUBCONSCIOUS:
         subconscious.start(speak=speak_reply, session_recap=previous_session)
         print("[subconscious: ON — drafting, chime-ins, mind-wandering]\n")
+    elif DRAFTING:
+        subconscious.start(speak=speak_reply, session_recap=previous_session, draft_only=True)
+        print("[drafting: ON — she drafts a reply while you talk, answers the instant you stop; "
+              "no chime-ins or daydreams]\n")
     else:
         print("[subconscious: OFF — plain STT -> Mira -> TTS, replies when addressed]\n")
 
@@ -455,8 +492,8 @@ try:
         typed = input().strip()
         if typed.lower() in ("quit", "exit"):
             scribe.finalize_if_active(notify=adapter.notify)  # save any open note session
-            if USE_SUBCONSCIOUS:
-                subconscious.stop()                   # quiet her mind first
+            if DRAFTING:
+                subconscious.stop()                   # quiet her mind / stop the drafter first
             adapter.stop()
             run_consolidation()                       # flush atomic facts
             try:

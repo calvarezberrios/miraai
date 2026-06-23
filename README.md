@@ -58,6 +58,17 @@ py -3.10 -m venv .venv-kokoro
 .\.venv-kokoro\Scripts\python.exe -m spacy download en_core_web_sm
 ```
 
+> ⚠️ **GPU torch for Kokoro.** `pip install kokoro` pulls the **CPU-only** PyTorch wheel, so
+> Kokoro will synthesize on the CPU (no NVIDIA GPU usage) even though it auto-selects CUDA when
+> available. After the install above, replace torch with a CUDA build that matches your card.
+> For an RTX 50-series (Blackwell, `sm_120`) the CUDA 13 wheel works:
+> ```powershell
+> .\.venv-kokoro\Scripts\python.exe -m pip install "torch==2.12.1+cu130" --index-url https://download.pytorch.org/whl/cu130
+> ```
+> For older cards a cu128 build (`--index-url https://download.pytorch.org/whl/cu128`) is fine.
+> Verify with `... -c "import torch; print(torch.cuda.is_available())"` → `True`. On startup
+> `kokoro_infer.py` logs `device=cuda:0` (and warns if it fell back to CPU).
+
 The Kokoro-82M weights and the **"Jessica"** voice (`af_jessica`) auto-download on first run — no
 files to place. (The `en_core_web_sm` line above is what misaki's English g2p needs; if you skip
 it, the very first launch will install it mid-run and fail once, then work — so just pre-install.) **espeak-ng** is bundled by the
@@ -132,6 +143,10 @@ python -m pip install -U "py-cord[voice] @ git+https://github.com/Pycord-Develop
 > ⚠️ **Do not run `pip install -U py-cord` later** — it will replace this with stable py-cord and
 > silently break voice receive. Keep the pinned line above. Re-check the project's voice-receive
 > PR periodically; once it ships in a release, you can unpin.
+>
+> This pinned build has a voice-receive bug that made audio arrive in ~5s bursts; we work around it
+> in-app (`_loop_pump`). See **`DISCORD_VOICE_FIX.md`** — it also covers whether/how to report the
+> bug upstream, and is worth checking before bumping the pin (the upstream fix may land there).
 
 Also confirm **ffmpeg** is on PATH (`ffmpeg -version`).
 
@@ -178,14 +193,29 @@ tight VRAM, forcing several conservative settings. On a newer/larger card you sh
 | Setting | Old (1660 Super) | Better GPU (RTX 20-series+ / 12GB+) |
 |---|---|---|
 | faster-whisper `COMPUTE_TYPE` (top of `wernickes_area.py`) | `int8` | `float16` — faster/cleaner if VRAM allows |
-| faster-whisper `MODEL_SIZE` | `small` | `medium` / `large-v3` for better accuracy |
+| faster-whisper `MODEL_SIZE` | `small` | `distil-large-v3` (current default) — large-v3 accuracy at ~3x the speed, English-only. Use `large-v3` if you need multilingual; `medium` for less VRAM |
 | Chat `MODEL` (top of `prefrontal_cortex.py`) | `qwen2.5:3b` | `qwen2.5:7b` or `llama3.1:8b` — better grounding, less invention |
 
 Kokoro and Piper TTS are both light and run fine on any GPU (CPU is fine too). With more
 VRAM the engines (LLM + Whisper + TTS) coexist comfortably, so the day-to-day VRAM squeeze
-goes away. Note: `VOICE_END_SILENCE` in `discord_adapter.py` (default 2.0s) controls Discord voice
-endpointing — raise it toward 3.0 only if the experimental py-cord build's bursty delivery chops
-your turns; that's a *library* limitation, not a GPU one.
+goes away. Note: `VOICE_END_SILENCE` in `discord_adapter.py` (default 3.0s, env
+`MIRA_VOICE_END_SILENCE`) controls how long after you stop talking her Discord turn ends; the
+local mic's equivalent is `END_SILENCE_SEC` (2.25s, env `MIRA_END_SILENCE_SEC`). Lower for
+snappier turn-taking; raise if she cuts you off during a pause.
+
+**Getting cut off / chopped into chunks in Discord voice?** Her turn ends only on a gap in your
+**transmission** — `discord_adapter._endpoint_speaker` watches `now - last_voice` (last_voice is
+bumped on every 20ms voice packet / Discord's `is_speaking`), NOT silence inside the audio buffer,
+and it never finalizes a new turn while she's mid-reply (`_brain_busy`). **The old ~5s "stutter /
+cut off every few words" problem was a bug in the pinned py-cord voice build (received audio was
+processed only when the event loop's ~5s heartbeat woke it, so it arrived in 5-second bursts). It's
+fixed** by a `_loop_pump` thread that keeps the loop awake during voice — see **`DISCORD_VOICE_FIX.md`**
+for the full root cause + the upstream-PR assessment. Tuning: `MIRA_VOICE_END_SILENCE` (0.7s gap
+after you stop — snappy now that delivery is real-time), `MIRA_VOICE_MAX_SECONDS` (60s safety cap).
+Diagnostics (all default-off): `MIRA_VOICE_DEBUG=1` (prints `delivery gap`/`finalized` lines — a
+return of steady ~5s `delivery gap`s means the pump isn't keeping up), `MIRA_VOICE_DUMP=1` (writes
+each utterance to `voice_debug/*.wav` so you can *listen* to what was captured), `MIRA_VOICE_LOG=1`
+(py-cord DAVE decrypt log).
 
 ---
 
@@ -208,6 +238,18 @@ and RVC, if the Piper engine is enabled, is launched automatically as a subproce
   ```
   Then, in a server text channel (with the bot present), type `mira join` while you're in a
   voice channel; `mira leave` to disconnect. Text chat works anywhere she can see.
+  (On the split laptop/desktop setup just run **`start_discord.bat`**, which sets the LAN brain
+  endpoints and launches `--discord --draft`. Voice speaker names need **Server Members Intent**
+  enabled in the Developer Portal.)
+
+- **Faster replies — pre-drafting** (`--draft`, or implied by `--subconscious`): she drafts a reply
+  *while you're still talking* and speaks it the instant you stop, instead of transcribe-then-think.
+  Identity-aware, no chime-ins or daydreams. `--subconscious` adds the full background mind
+  (autonomous chime-ins + mind-wandering).
+
+- **Knowing who's talking:** in Discord she identifies speakers by their **display name** and treats
+  an unfamiliar name as someone new until told who they are ("I'm GameRaiderX" is remembered across
+  sessions). Needs Server Members Intent (above).
 
 First run downloads the Whisper model (one-time).
 
@@ -239,6 +281,14 @@ the app crashes); quitting mid-session also finalizes the file.
   clean Piper voice. Tune `INDEX_RATE` (lower if it warbles) and `PITCH_SHIFT`.
 - **`RuntimeError: cublas64_12.dll not found`** → run the 4b install; confirm the DLL shim is
   still at the top of `wernickes_area.py`. Install with `python -m pip` so wheels land in `.venv`.
+- **Kokoro TTS: `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH` at synth time** (model loads on
+  `cuda:0`, then the first conv dies) → a cuDNN clash between the two venvs. faster-whisper's main
+  `.venv` ships **CUDA-12 cuDNN** (`nvidia-cudnn-cu12`) and prepends it to `PATH`; the Kokoro
+  subprocess inherits that `PATH` but its torch (cu130) bundles **CUDA-13 cuDNN** in `torch/lib`.
+  Both files are named `cudnn64_9.dll`, so Kokoro loads the wrong one. `kokoro_infer.py` has a
+  `_isolate_cuda_dlls()` shim at the very top (before torch import) that strips foreign CUDA dirs
+  from `PATH` and puts its own `torch/lib` first — keep it there. (Only matters when STT and TTS
+  share a process tree, e.g. the real app; a standalone Kokoro run won't hit it.)
 - **Discord voice: noise / no audio received, or it "hears" nothing** → you're on stable py-cord.
   Reinstall the pinned build from 4c and confirm with
   `python -c "import discord; print(discord.__version__)"` (should be a dev build, not 2.8.x).

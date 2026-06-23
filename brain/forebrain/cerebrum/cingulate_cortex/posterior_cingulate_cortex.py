@@ -100,6 +100,7 @@ _last_wander_spoke = 0.0               # last time a wandering thought was voice
 # Listening / drafting state
 _someone_speaking = False              # True between the first partial and the final
 _last_partial = ""                     # newest live transcript of what's being said
+_draft_speaker: Optional[str] = None   # display name of who's currently speaking (for identity)
 _draft_req = 0                         # bumped each time the partial changes (a new draft is wanted)
 _draft_done = -1                       # _draft_req value the current _draft was built from
 _draft: Optional[dict] = None          # {"text": ..., "partial": ...} — the reply waiting in the wings
@@ -113,20 +114,26 @@ _session_recap: Optional[str] = None
 # Public API (called by main.py)
 # ---------------------------------------------------------------------------
 
-def start(speak: Callable, session_recap: Optional[str] = None) -> None:
+def start(speak: Callable, session_recap: Optional[str] = None,
+          draft_only: bool = False) -> None:
     """Begin the subconscious. `speak(text, *, user_text=None, channel='local',
-    source='reply')` must perform the full serialized speak sequence."""
+    source='reply')` must perform the full serialized speak sequence.
+
+    draft_only=True runs ONLY job 1 (listen-and-draft, for faster replies) — it does NOT
+    start the wander/decide loop, so there are no autonomous chime-ins and no spoken
+    mind-wandering/daydreams; she only ever speaks when directly addressed."""
     global _speak, _thread, _drafter, _last_activity, _session_recap
     _speak = speak
     _session_recap = session_recap
     _last_activity = time.time()
-    if _thread is not None and _thread.is_alive():
+    if _drafter is not None and _drafter.is_alive():
         return
     _running.set()
-    _thread = threading.Thread(target=_loop, name="subconscious", daemon=True)
-    _thread.start()
     _drafter = threading.Thread(target=_drafter_loop, name="subconscious-drafter", daemon=True)
     _drafter.start()
+    if not draft_only:
+        _thread = threading.Thread(target=_loop, name="subconscious", daemon=True)
+        _thread.start()
 
 
 def stop() -> None:
@@ -171,11 +178,12 @@ def resume() -> None:
     _last_activity = time.time()      # don't let her mind wander the instant she resumes
 
 
-def observe_partial(text: str, channel: str = "local") -> None:
+def observe_partial(text: str, channel: str = "local", speaker: Optional[str] = None) -> None:
     """Feed the subconscious a live partial transcript of what's being said right
     now. She marks that someone's speaking and (re)drafts a reply to it in the
-    background, so she's ready to answer the moment they stop."""
-    global _someone_speaking, _last_channel, _last_partial, _draft_req
+    background, so she's ready to answer the moment they stop. `speaker` (Discord
+    display name) lets the draft be identity-aware, like a normal reply."""
+    global _someone_speaking, _last_channel, _last_partial, _draft_req, _draft_speaker
     if _paused.is_set():
         return
     text = (text or "").strip()
@@ -185,6 +193,7 @@ def observe_partial(text: str, channel: str = "local") -> None:
     with _lock:
         _someone_speaking = True
         _last_channel = channel or "local"
+        _draft_speaker = speaker
         if text != _last_partial:
             _last_partial = text
             # Only spend a (slow) generation once there's enough to react to — but
@@ -294,15 +303,28 @@ def _draft_globals_store(text: str, partial: str, req: int) -> None:
 
 
 def _produce_draft(partial: str) -> str:
-    """Draft a reply to what's being said so far, grounded in related memories."""
+    """Draft a reply to what's being said so far, grounded in related memories — and
+    identity-aware (who's speaking), mirroring main.py's addressed-reply path."""
     history, _seq = thalamus.snapshot()
     provisional = history + [{"role": "user", "content": partial}]
+    with _lock:
+        speaker = _draft_speaker
+        channel = _last_channel
     memories = recall(partial)
+    # recall on the speaker's name too, so a stored "X is GameRaiderX" identity surfaces
+    ident_speaker = speaker if str(channel).startswith("discord") else None
+    if ident_speaker:
+        for m in recall(ident_speaker, max_distance=1.1):
+            if m not in memories:
+                memories.append(m)
+    speaker_known = bool(ident_speaker) and any(
+        ident_speaker.lower() in m.lower() for m in memories)
     if _session_recap:
         memories = [f"From our last session: {_session_recap}"] + memories
     return prefrontal_cortex.think(
         provisional, amygdala.color(), memories, _situation(listening=True),
         inner_thoughts=recent_thoughts(partial), model=DRAFT_MODEL,
+        speaker=ident_speaker, speaker_known=speaker_known,
     )
 
 
@@ -326,13 +348,14 @@ def _draft_usable(d: dict, final_text: str) -> bool:
 
 
 def _reset_listening() -> None:
-    global _someone_speaking, _last_partial, _draft, _draft_req, _draft_done
+    global _someone_speaking, _last_partial, _draft, _draft_req, _draft_done, _draft_speaker
     with _lock:
         _someone_speaking = False
         _last_partial = ""
         _draft = None
         _draft_req += 1            # invalidate any in-flight draft
         _draft_done = -1
+        _draft_speaker = None
 
 
 # ---------------------------------------------------------------------------

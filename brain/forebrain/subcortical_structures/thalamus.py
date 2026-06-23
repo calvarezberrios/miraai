@@ -12,11 +12,17 @@ working_memory = deque(maxlen = MAX_TURNS) # Mira's working memory, stores recen
 _seq = 0
 _lock = Lock()
 
-def receive(user_message: str) -> list[dict]:
-    """Route incoming message into working memory, return current context"""
+def receive(user_message: str, speaker: str = None) -> list[dict]:
+    """Route incoming message into working memory, return current context.
+
+    When `speaker` is given (the Discord display name, or "You" locally) the turn is stored
+    as "Speaker: text" so the brain can tell WHO said what across multiple people in a voice
+    channel. The dict stays a plain {role, content} (no extra keys), so it's still a valid
+    OpenAI message. Her own replies (remember_reply) stay unprefixed."""
     global _seq
+    content = f"{speaker}: {user_message}" if speaker else user_message
     with _lock:
-        working_memory.append({"role": "user", "content": user_message})
+        working_memory.append({"role": "user", "content": content})
         _seq += 1
         return list(working_memory)
 

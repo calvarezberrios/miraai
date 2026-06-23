@@ -6,6 +6,52 @@ human brain reference + build plan docs) to get back up to speed.
 
 ---
 
+## Recent changes — 2026-06-23 (READ FIRST; supersedes stale hardware/voice bits below)
+
+**Hardware moved.** Mira now runs on a **laptop with an RTX 5050 (8 GB, Blackwell, sm_120)**, and
+the **LLM runs on a separate desktop PC** over the LAN (llama.cpp model id `turbo` at
+`192.168.12.151:8080`, embeddings `:11434`) — see `LAPTOP_SETUP.md`. So the old handoff notes about
+a **GTX 1660 Super / 6 GB / "broken fp16, full-precision only" / `D:\aiproject`** are **STALE**: the
+laptop GPU has a working fp16 path and only holds **STT + TTS** (the LLM is off-box). Launch Discord
+mode with **`start_discord.bat`** (sets the LAN endpoints + `--discord --draft`).
+
+- **🔴 Discord voice ~5s "stutter/cutoff" — ROOT-CAUSED & FIXED.** This was a real bug in the pinned
+  experimental py-cord voice build: received audio packets are processed as tasks on the asyncio
+  event loop, but the loop was only woken by its ~5s voice heartbeat, so audio arrived in 5-second
+  bursts and the endpointer chopped sentences. Fixed with a tiny `_loop_pump` thread in
+  `discord_adapter.py` that keeps the loop awake during voice (`call_soon_threadsafe` every 10 ms).
+  **Full write-up + upstream-PR assessment: `DISCORD_VOICE_FIX.md`.** This makes Discord voice
+  finally smooth — you can talk freely without being cut off.
+- **Discord endpointing rewritten.** Ends a turn on a *transmission* gap (`now - last_voice`), NOT
+  on silence inside the (bursty) buffer; **never finalizes while Mira is speaking** (`_brain_busy`)
+  so her reply can't chunk your continued speech; re-transcribes the whole utterance fresh at
+  finalize. `VOICE_END_SILENCE` default `0.7s` (was 2.0). Diagnostics added (all default-off):
+  `MIRA_VOICE_DEBUG`, `MIRA_VOICE_DUMP` (dump utterance WAV), `MIRA_VOICE_LOG` (DAVE drop log),
+  `MIRA_VOICE_PARTIAL_WINDOW_SEC` (partials transcribe only the last N sec).
+- **STT:** `wernickes_area.py` defaults now `MODEL_SIZE=distil-large-v3`, `COMPUTE_TYPE=float16`
+  (great English accuracy, ~340 ms/utterance, ~2 GB). NOTE `start_discord.bat` sets
+  `WHISPER_MODEL_SIZE` explicitly, so change the model THERE for real runs.
+- **TTS (Kokoro) now runs on the GPU.** `pip install kokoro` pulls **CPU-only** torch; fixed by
+  installing `torch==2.12.1+cu130` into `.venv-kokoro` (Blackwell needs cu128+). `kokoro_infer.py`
+  has a `_isolate_cuda_dlls()` shim so it loads its own CUDA-13 cuDNN, not the main venv's CUDA-12
+  one (that clash caused `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`). Logs `device=cuda:0`.
+- **Speaker identity (NEW).** Mira now knows who's talking by **Discord display name** and treats an
+  unfamiliar name as a stranger until told who they are; saying "I'm GameRaiderX" is consolidated to
+  memory so that name is recognized next session. Touches: `intents.members=True`
+  (`discord_adapter`), speaker-prefixed turns (`thalamus.receive`, `hippocampus.observe`), a per-turn
+  identity block + conditional "Senpai" in `prefrontal_cortex._build_system`, identity-capture in the
+  consolidation prompt, and speaker wiring in `main.py` (`_recall_for`). Needs **Server Members
+  Intent** enabled in the Developer Portal or names show as `<Object id=…>`.
+- **Consolidation bug fixed.** `hippocampus._digest()` didn't pass the no-think flag, so on the
+  `turbo` reasoning model it returned EMPTY → long-term memory silently stored nothing. Now passes
+  `extra_body=_pfc._EXTRA`.
+- **Drafting (job 1 of the subconscious) can run standalone.** New `--draft` flag (enabled in
+  `start_discord.bat`) and `subconscious.start(draft_only=True)`: she pre-drafts a reply *while you
+  talk* (identity-aware) and answers the instant you stop, WITHOUT the full subconscious's chime-ins
+  or daydreams. `--subconscious` still enables the whole background mind.
+
+---
+
 ## Note-taking mode (DLPFC scribe) — NEW (READ FIRST)
 
 Mira can now **take notes** of what she hears — local mic or Discord voice — but **only

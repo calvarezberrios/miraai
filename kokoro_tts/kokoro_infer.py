@@ -20,8 +20,35 @@ Output is always 24 kHz mono PCM-16 WAV (Kokoro's native rate).
 """
 
 import argparse
+import os
 import sys
 import traceback
+
+# --- CUDA DLL isolation (must run before torch is imported) -----------------
+# Mira's main process (Python 3.11) launches this script as a subprocess. That
+# process imports faster-whisper, whose shim PREPENDS its own CUDA-12 cuDNN
+# (nvidia-cudnn-cu12, for CTranslate2) onto PATH. Our torch is cu130 and bundles
+# a CUDA-13 cuDNN in torch/lib. BOTH expose a file literally named cudnn64_9.dll,
+# so inheriting the parent's PATH makes us load the parent's CUDA-12 cudnn64_9.dll
+# while our CUDA-13 sublibraries come from torch/lib -> at synth time cuDNN dies
+# with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. Fix: drop any foreign CUDA dirs
+# from the inherited PATH and put OUR torch/lib first so we load our own cuDNN.
+def _isolate_cuda_dlls():
+    prefix = os.path.normcase(os.path.abspath(sys.prefix))
+    def _foreign(entry):
+        e = os.path.normcase(entry)
+        return (("cudnn" in e or "cublas" in e or "nvidia" in e)
+                and not e.startswith(prefix))
+    kept = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+            if p and not _foreign(p)]
+    own = [d for d in (os.path.join(sys.prefix, "Lib", "site-packages", "torch", "lib"),)
+           if os.path.isdir(d)]
+    for d in own:
+        os.add_dll_directory(d)          # highest-priority search dir
+    os.environ["PATH"] = os.pathsep.join(own + kept)
+
+_isolate_cuda_dlls()
+# ---------------------------------------------------------------------------
 
 import numpy as np
 import soundfile as sf
@@ -44,7 +71,17 @@ def parse_args():
 def build_pipeline(args):
     from kokoro import KPipeline
     pipeline = KPipeline(lang_code=args.lang, repo_id=args.repo)
-    print(f"[kokoro] pipeline ready (voice={args.voice}, lang={args.lang})", file=sys.stderr)
+    # KPipeline auto-selects cuda when torch.cuda.is_available(); log where the model
+    # actually landed so a CPU-only torch (no GPU) is obvious from the startup output.
+    try:
+        device = str(next(pipeline.model.parameters()).device)
+    except Exception:
+        device = "unknown"
+    print(f"[kokoro] pipeline ready (voice={args.voice}, lang={args.lang}, device={device})",
+          file=sys.stderr)
+    if device.startswith("cpu"):
+        print("[kokoro] WARNING: running on CPU — install a CUDA torch in .venv-kokoro "
+              "for GPU synthesis (see README section 3a).", file=sys.stderr)
     return pipeline
 
 
