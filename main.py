@@ -24,6 +24,7 @@ from brain.forebrain.cerebrum.frontal_lobe import prefrontal_cortex
 from brain.forebrain.cerebrum.frontal_lobe import motor_cortex
 from brain.forebrain.cerebrum.frontal_lobe import brocas_area
 from brain.forebrain.cerebrum.frontal_lobe import dorsolateral_prefrontal_cortex as scribe
+from brain.forebrain.cerebrum.frontal_lobe.games import game_master
 from brain.forebrain.cerebrum.cingulate_cortex import posterior_cingulate_cortex as subconscious
 from brain.hindbrain.cerebellum import coordinator as cerebellum
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
@@ -305,6 +306,13 @@ def handle_message(event, interrupting=False):
     if scribe.intercept(event, notify=adapter.notify):
         return
 
+    # Deep IQ game mode (Magic: The Gathering vs the "Deep IQ" AI). When a game is active (or the
+    # player says "let's play magic"), this owns the turn: a real dice + state engine runs and Mira
+    # narrates it. Consumes the event so normal chat doesn't double-reply. Returns False when no
+    # game is running and this isn't a start command.
+    if game_master.intercept(event, notify=adapter.notify, speak=speak_reply):
+        return
+
     # She follows the whole room: every message updates short-term context,
     # whether or not she ends up replying to it. (The subconscious reads this.)
     # Tag the turn with WHO said it so multi-speaker context stays attributable.
@@ -521,6 +529,7 @@ try:
         typed = input().strip()
         if typed.lower() in ("quit", "exit"):
             scribe.finalize_if_active(notify=adapter.notify)  # save any open note session
+            game_master.finalize_if_active(notify=adapter.notify)  # save an in-progress Deep IQ game
             if DRAFTING:
                 subconscious.stop()                   # quiet her mind / stop the drafter first
             adapter.stop()
