@@ -265,6 +265,22 @@ and RVC, if the Piper engine is enabled, is launched automatically as a subproce
   (remove). Needs the desktop embedding server (memory) reachable. *Text PDFs only — a scanned
   (image) PDF has no extractable text; she'll say so.* Needs `pypdf` (in `requirements.txt`).
 
+- **Play Magic: The Gathering vs "Deep IQ"** — say **"let's play magic / MtG / Deep IQ"** and Mira
+  becomes the *Deep IQ* solo-AI opponent (from `Deep IQ 2017 - Full.pdf`). A real **engine** owns the
+  game so she can't fake dice or lose track: it rolls actual dice, runs the Tables I–VI / token /
+  Spooky charts, and tracks **both battlefields, both life totals, the table she's on, and modifiers**
+  — Mira just narrates what the engine did (she physically can't invent a roll). You play your own
+  cards and **tell her what you play** ("I play a 3/3 bear with trample and a Sol Ring"); after each
+  of her turns she posts a **state panel** to the text channel so you can see her board + the score.
+  Say **"your turn"** and Deep IQ's turn runs as a proper, **interactive Magic turn**: for each
+  action it takes (a token, removal, damage) you get **priority** — she announces it and asks if you
+  **respond (instant/counter) or pass**; then a **blocking step** — she declares attackers and asks
+  which of your creatures block which, and the **engine computes the combat math** (lethal,
+  deathtouch, trample, flying, first strike) and updates both boards + life. Also **"roll a d20"**
+  for an ad-hoc roll, ask for the **"board/state"** anytime, **"my life is 17"** to correct a total,
+  and **"stop playing"** to end (the game **saves and resumes** across sessions). Engine:
+  `brain/forebrain/cerebrum/frontal_lobe/games/` (`deep_iq_engine.py` + `game_master.py`).
+
 First run downloads the Whisper model (one-time).
 
 ### Note-taking

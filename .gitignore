@@ -56,6 +56,10 @@ notes/
 # Discord voice debug dumps (MIRA_VOICE_DUMP=1) — captured utterance WAVs, diagnostic only
 voice_debug/
 
+# Deep IQ saved game state (local play state) — root-anchored so it does NOT match the
+# code package brain/.../frontal_lobe/games/
+/games/
+
 # VTuber assets (if large — Live2D/VRM models can be hefty)
 # Uncomment if you don't want them in the repo:
 # assets/models/

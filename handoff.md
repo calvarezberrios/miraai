@@ -64,6 +64,32 @@ mode with **`start_discord.bat`** (sets the LAN endpoints + `--discord --draft`)
 - **Console de-dup.** A voice utterance printed 3× (`[mic]` live, `[voice]`, then again before her
   reply). Removed the `[voice]` line and now `_clear_mic_line()` wipes the rolling `[mic]` caption on
   finalize so it settles into one committed "Speaker: text" line.
+- **Deep IQ MtG game mode (NEW).** Say "let's play magic/MtG/Deep IQ" → Mira plays the *Deep IQ*
+  solo-AI opponent. New package `brain/forebrain/cerebrum/frontal_lobe/games/`:
+  - `deep_iq_engine.py` — PURE, unit-tested engine: real `roll()` dice, `GameState` dataclass
+    (table, both life totals, both battlefields, modifiers, JSON persist), Tables I–VI + token +
+    Spooky charts + colour identity encoded as DATA, `take_diq_turn()` runs a full turn
+    deterministically, `render_panel()`. No LLM/IO. This is why she can't fake dice or forget state.
+  - `game_master.py` — the MODE (mirrors the scribe's `intercept`/`is_active`/`finalize_if_active`).
+    Parses commands (start/your-turn/roll/report-plays/state/end), LLM-extracts the player's reported
+    plays into the engine's player board, and has Mira NARRATE the engine turn log via a tightly
+    constrained low-temp call (`_diq_view` gives Deep-IQ-perspective labels so she doesn't claim the
+    player's cards; strict rules forbid inventing rolls). Posts the state panel via `notify`; saves to
+    `games/deep_iq_state.json` (gitignored) and resumes across sessions.
+  - Wired one line into `main.py.handle_message` next to the scribe; `finalize_if_active` on quit.
+  - **Interactive turn (priority + blocking).** "your turn" runs Deep IQ's turn as a stepped MtG turn:
+    `engine.plan_turn()` rolls everything + applies Deep IQ's own bookkeeping but DEFERS the
+    player-facing actions; `game_master` walks them with a `_pending` state machine — each action gets
+    a **priority window** (announce → "respond or pass?"; `_is_countered()` keyword check → resolve or
+    skip), then a **blocking step** (declare attackers → `_extract_blocks()` LLM-parses the player's
+    block declaration → `engine.apply_combat()` computes lethal/deathtouch/trample/flying/first-strike,
+    updates both boards + life) → `do_advancement()`. `combat_attackers()` excludes defenders/tapped.
+    The player's reported creatures carry `abilities` (flying etc.) for combat. `take_diq_turn()` (the
+    old atomic path) is kept for the unit test.
+  - **Caveat:** the player still resolves removal/responses with their own physical cards and reports
+    the outcome; the engine auto-updates Deep IQ's side + life + combat. Quitting mid-priority-window
+    loses the rest of that one turn's queue (DIQ-side state was already applied+saved). Ingest the PDF
+    via document RAG for rules-lawyer Q&A.
 
 ---
 
