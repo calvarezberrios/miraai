@@ -47,6 +47,12 @@ REFRESH_SEC = 0.7           # how often live partials update
 # send the rest as a second turn after she'd already replied). Tune with MIRA_END_SILENCE_SEC
 # — lower it for snappier turn-taking, raise it if she still cuts you off.
 END_SILENCE_SEC = float(os.environ.get("MIRA_END_SILENCE_SEC", "2.25"))
+# Speculative prefill: once the speaker has paused this long (but BEFORE the utterance is
+# finalized at END_SILENCE_SEC), fire on_prefill(text) so the brain can warm the LLM on the
+# partial transcript while the rest of the silence window elapses — the real reply's first
+# token then lands faster. If they start talking again the pause resets and on_prefill("")
+# cancels it. Must be < END_SILENCE_SEC; set to 0 to disable. Tune with MIRA_PREFILL_AFTER_SEC.
+PREFILL_AFTER_SEC = float(os.environ.get("MIRA_PREFILL_AFTER_SEC", "0.5"))
 INTERRUPT_AFTER_SEC = 25.0  # monologue length that lets Mira interrupt
 # distil-large-v3: distilled large-v3, ~2-3x faster decode at near-identical English accuracy
 # (English-only). large-v3 (~930ms/utterance) overran the 0.7s partial-refresh cadence and
@@ -108,10 +114,11 @@ def transcribe(audio):
     return _transcribe(np.asarray(audio, dtype=np.float32))
 
 
-def _worker(on_final, on_partial, on_interrupt):
+def _worker(on_final, on_partial, on_interrupt, on_prefill=None):
     buf = np.zeros(0, dtype=np.float32)
     last_refresh = 0.0
     interrupted = False
+    prefilled = False        # have we fired a speculative prefill for the current pause?
 
     while _running:
 
@@ -119,6 +126,7 @@ def _worker(on_final, on_partial, on_interrupt):
             _flush.clear()
             buf = np.zeros(0, dtype = np.float32)
             interrupted = False
+            prefilled = False
 
         try:
             buf = np.concatenate([buf, _audio_q.get(timeout=0.1)])
@@ -144,9 +152,21 @@ def _worker(on_final, on_partial, on_interrupt):
         silence = (len(buf) - speech[-1]["end"]) / SAMPLE_RATE
         spoken = (speech[-1]["end"] - speech[0]["start"]) / SAMPLE_RATE
 
+        # Speculative prefill: a brief pause (but not yet a finalized turn) -> warm the LLM
+        # on what's been said so far. A renewed pause after they keep talking re-fires; if
+        # they resume (silence drops back under the threshold) we cancel the in-flight one.
+        if on_prefill and PREFILL_AFTER_SEC > 0 and text:
+            if not prefilled and PREFILL_AFTER_SEC <= silence < END_SILENCE_SEC:
+                prefilled = True
+                on_prefill(text)
+            elif prefilled and silence < PREFILL_AFTER_SEC:
+                prefilled = False
+                on_prefill("")          # they resumed talking -> cancel the speculative prefill
+
         if silence >= END_SILENCE_SEC:
             buf = np.zeros(0, dtype=np.float32)
             interrupted = False
+            prefilled = False
             if text:
                 on_final(text)
         elif spoken >= INTERRUPT_AFTER_SEC and not interrupted and on_interrupt:
@@ -154,8 +174,12 @@ def _worker(on_final, on_partial, on_interrupt):
             on_interrupt(text)
 
 
-def start(on_final, on_partial=None, on_interrupt=None):
-    """Load the model, open the mic, begin listening."""
+def start(on_final, on_partial=None, on_interrupt=None, on_prefill=None):
+    """Load the model, open the mic, begin listening.
+
+    on_prefill(text): optional. Fired once the speaker has paused PREFILL_AFTER_SEC mid/after an
+    utterance so the brain can speculatively warm the LLM on the partial transcript; called with
+    "" if they resume talking (cancel). No-op when omitted."""
     global _running, _thread, _stream
     _ensure_model()
     _running = True
@@ -170,7 +194,7 @@ def start(on_final, on_partial=None, on_interrupt=None):
     )
     _stream.start()
     _thread = threading.Thread(
-        target=_worker, args=(on_final, on_partial, on_interrupt), daemon=True
+        target=_worker, args=(on_final, on_partial, on_interrupt, on_prefill), daemon=True
     )
     _thread.start()
 

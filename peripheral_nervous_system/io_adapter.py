@@ -24,6 +24,8 @@ from typing import Any, Callable, Optional
 FINAL = "final"          # a complete utterance -> drive a turn
 PARTIAL = "partial"      # live in-progress transcript -> just display
 INTERRUPT = "interrupt"  # speaker ran long; partial handed over so Mira can cut in
+PREFILL = "prefill"      # brief pause mid/after an utterance -> speculatively warm the LLM
+                         # prompt on the partial (text=""  means "they resumed; cancel it")
 
 
 @dataclass

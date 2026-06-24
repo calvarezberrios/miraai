@@ -27,7 +27,7 @@ from brain.forebrain.cerebrum.frontal_lobe import dorsolateral_prefrontal_cortex
 from brain.forebrain.cerebrum.frontal_lobe.games import game_master
 from brain.forebrain.cerebrum.cingulate_cortex import posterior_cingulate_cortex as subconscious
 from brain.hindbrain.cerebellum import coordinator as cerebellum
-from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply
+from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply, snapshot
 from brain.forebrain.subcortical_structures import hypothalamus
 from brain.forebrain.subcortical_structures.limbic_system.amygdala import feel, color
 import brain.forebrain.subcortical_structures.limbic_system.amygdala as amygdala
@@ -38,7 +38,7 @@ from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
 from brain.forebrain.subcortical_structures.basal_ganglia.action_selector import (
     should_respond, mark_engaged,
 )
-from peripheral_nervous_system.io_adapter import InputEvent, PARTIAL, INTERRUPT
+from peripheral_nervous_system.io_adapter import InputEvent, PARTIAL, INTERRUPT, PREFILL
 
 CONSOLIDATE_EVERY_MESSAGES = 95       # consolidate after this many messages...
 CONSOLIDATE_EVERY_SECONDS = 30 * 60   # ...or this long, whichever comes first
@@ -296,6 +296,93 @@ def _recall_for(event):
     return memories, ident_speaker, speaker_known, documents
 
 
+# --- speculative prefill (warm the LLM during the end-of-utterance silence) ----------
+# When the speaker pauses mid/after an utterance (before the turn is finalized), wernickes
+# fires a PREFILL event with the partial transcript. We do the per-turn prep that normally
+# only happens AFTER they fully stop — recall the relevant memories (the embedding +
+# vector-search wall-clock) and run a 1-token LLM prefill so the server caches this turn's
+# prompt prefix — overlapping it with the dead time of the silence window. If the finalized
+# turn matches, handle_message reuses the recalled memories and think_stream's first token
+# lands off the warm cache. A generation counter makes it cancel-safe: every new or aborted
+# prefill bumps it, so a stale in-flight one's result is dropped.
+_prefill_lock = threading.Lock()
+_prefill_gen = 0
+_prefill_cache = {}   # last completed prefill: {text, memories, ident_speaker, speaker_known, documents}
+
+
+def _prefill_prev_seen(event):
+    """The 'previous message' timestamp for this channel, mirroring handle_message."""
+    chan_key = getattr(event.raw, "id", None)
+    chan_key = str(chan_key) if chan_key is not None else event.channel
+    prev_seen = _last_seen.get(chan_key)
+    if prev_seen is None and _startup_last_active is not None:
+        prev_seen = _startup_last_active
+    return prev_seen
+
+
+def _cancel_prefill():
+    """Speaker resumed (or the turn was consumed): invalidate any in-flight/stored prefill."""
+    global _prefill_gen
+    with _prefill_lock:
+        _prefill_gen += 1
+        _prefill_cache.clear()
+
+
+def _speculative_prefill(event):
+    """Warm recall + the LLM for `event.text` in the background, during the silence window."""
+    # With drafting on, the subconscious already pre-generates a full reply from the partials,
+    # so a prefill would be redundant work fighting it for the GPU.
+    if DRAFTING:
+        return
+    text = (event.text or "").strip()
+    if not text:
+        return
+    global _prefill_gen
+    with _prefill_lock:
+        if _prefill_cache.get("text") == text:
+            return                              # already warmed this exact transcript
+        _prefill_gen += 1
+        gen = _prefill_gen
+
+    def run():
+        try:
+            memories, ident_speaker, speaker_known, documents = _recall_for(event)
+            with _prefill_lock:
+                if gen != _prefill_gen:         # superseded/cancelled while recalling
+                    return
+                _prefill_cache.update(
+                    text=text, memories=memories, ident_speaker=ident_speaker,
+                    speaker_known=speaker_known, documents=documents)
+            # Build the SAME prompt the real turn will and 1-token-warm it: mirror the
+            # session-recap prepend and the "Speaker: text" user-turn formatting that
+            # handle_message + thalamus.receive produce, so the cached prefix actually matches.
+            warm_mem = ([f"From our last session: {previous_session}"] + memories
+                        if previous_session else memories)
+            history, _ = snapshot()
+            ctx = history + [{"role": "user", "content": f"{event.speaker}: {text}"}]
+            situation = describe_situation(event, _prefill_prev_seen(event), time.time())
+            prefrontal_cortex.prefill(ctx, color(), warm_mem, situation=situation,
+                                      speaker=ident_speaker, speaker_known=speaker_known,
+                                      documents=documents)
+        except Exception as e:
+            print(f"[prefill skipped: {e}]")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _take_prefill(text):
+    """If a completed prefill matches this finalized turn, hand back its recalled memories so
+    handle_message can skip re-recalling (the LLM prefix is already warm). Consumes the cache."""
+    text = (text or "").strip()
+    with _prefill_lock:
+        if _prefill_cache.get("text") == text:
+            cached = (_prefill_cache["memories"], _prefill_cache["ident_speaker"],
+                      _prefill_cache["speaker_known"], _prefill_cache["documents"])
+            _prefill_cache.clear()
+            return cached
+    return None
+
+
 def handle_message(event, interrupting=False):
     now = time.time()
 
@@ -380,7 +467,13 @@ def handle_message(event, interrupting=False):
                 inner_thoughts = subconscious.recent_thoughts(event.text)
 
         if not reply:
-            memories, ident_speaker, speaker_known, documents = _recall_for(event)
+            # Reuse the speculative prefill if it warmed this exact turn (recall already done,
+            # LLM prefix already cached); otherwise recall now.
+            cached = None if interrupting else _take_prefill(event.text)
+            if cached:
+                memories, ident_speaker, speaker_known, documents = cached
+            else:
+                memories, ident_speaker, speaker_known, documents = _recall_for(event)
             if previous_session:
                 memories = [f"From our last session: {previous_session}"] + memories
             flavor = color() + (INTERRUPT_NOTE if interrupting else "")
@@ -442,6 +535,14 @@ def on_event(ev):
         # she only listens, so there's no draft and the subconscious is paused.)
         if DRAFTING and not scribe.is_active():
             subconscious.observe_partial(ev.text or "", channel=ev.channel, speaker=ev.speaker)
+    elif ev.kind == PREFILL:
+        # Brief pause in an utterance: warm the LLM on the partial (text), or cancel if the
+        # speaker resumed (empty text). Never while taking notes — she only listens then.
+        if ev.text and ev.text.strip():
+            if not scribe.is_active():
+                _speculative_prefill(ev)
+        else:
+            _cancel_prefill()
     elif ev.kind == INTERRUPT:
         _clear_mic_line()
         handle_message(ev, interrupting=True)

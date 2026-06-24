@@ -349,6 +349,33 @@ def think_stream(history: list[dict], mood_flavor: str = "", memories=None,
     return _stream_sentences(_iter_deltas(stream))
 
 
+def prefill(history: list[dict], mood_flavor: str = "", memories=None, situation: str = "",
+            inner_thoughts=None, model: str = None, speaker: str = None,
+            speaker_known: bool = False, documents=None) -> None:
+    """Best-effort KV warm for an UPCOMING reply. Builds the exact same system prompt
+    think_stream() will use (same _build_system args) and runs a 1-token completion, so the
+    server caches this turn's whole prompt prefix (persona + identity + situation + memories +
+    the user's line). Called speculatively during the end-of-utterance silence: if the finalized
+    turn matches, think_stream()'s first token lands fast off the cached prefix; if it diverges,
+    this was just a cheap throwaway. Swallows everything — it must never affect the real turn."""
+    try:
+        system_content = _build_system(mood_flavor, memories, situation, inner_thoughts,
+                                       speaker=speaker, speaker_known=speaker_known,
+                                       documents=documents)
+        client.chat.completions.create(
+            model=model or MODEL,
+            messages=[
+                {"role": "system", "content": system_content},
+                *history
+            ],
+            max_tokens=1,
+            temperature=0.0,
+            extra_body=_EXTRA,
+        )
+    except Exception:
+        pass
+
+
 def warmup(model: str = None) -> None:
     """Pre-prefill the persona prefix so the FIRST real reply isn't a cold wait. On a
     CPU-expert model (the Qwen3 turbo build) prefilling the ~1500-token persona takes ~2

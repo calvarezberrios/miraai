@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .io_adapter import IOAdapter, InputEvent, OnEvent, FINAL, PARTIAL, INTERRUPT
+from .io_adapter import IOAdapter, InputEvent, OnEvent, FINAL, PARTIAL, INTERRUPT, PREFILL
 
 # existing modules (paths per the current folder structure)
 from brain.forebrain.cerebrum.temporal_lobe import wernickes_area as ears
@@ -39,6 +39,7 @@ class LocalAdapter(IOAdapter):
             on_final=self._final,
             on_partial=self._partial,
             on_interrupt=self._interrupt,
+            on_prefill=self._prefill_hint,
         )
 
     def stop(self) -> None:
@@ -69,6 +70,10 @@ class LocalAdapter(IOAdapter):
 
     def _interrupt(self, text: str) -> None:
         self._emit(text, INTERRUPT)
+
+    def _prefill_hint(self, text: str) -> None:
+        # text="" is the cancel signal (speaker resumed); pass it through unchanged.
+        self._emit(text, PREFILL)
 
     # --- mouth ---
     def speak(self, text: str) -> None:
