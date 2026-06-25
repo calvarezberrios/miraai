@@ -21,6 +21,7 @@ _synthesize() and warmup() branch on the engine.
 """
 
 import atexit
+import collections
 import io
 import os
 import queue
@@ -212,18 +213,36 @@ def _start_kokoro_server():
            "--voice", KOKORO_VOICE, "--lang", KOKORO_LANG,
            "--repo", KOKORO_REPO, "--speed", str(KOKORO_SPEED)]
     try:
+        # Capture the server's stderr instead of letting it inherit our console: torch/HF
+        # warnings and its own "[kokoro] pipeline ready" diagnostics would otherwise stomp on
+        # the startup progress bar. A daemon thread drains it (so the pipe can't fill and block
+        # the server) into a small ring buffer we only surface if the server fails to come up.
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=None, text=True, bufsize=1)
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
     except Exception as e:
         print("[brocas_area] failed to launch Kokoro server:", e)
         return None
+
+    stderr_tail = collections.deque(maxlen=50)
+
+    def _drain_stderr():
+        for ln in proc.stderr:
+            stderr_tail.append(ln.rstrip("\n"))
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
     for line in proc.stdout:
         if line.strip() == "READY":
             print("[brocas_area] Kokoro server ready")
             return proc
         if proc.poll() is not None:
             break
+    # It died before signaling READY — surface the captured stderr so the real cause is visible.
     print("[brocas_area] Kokoro server exited before becoming ready")
+    if stderr_tail:
+        print("[brocas_area] Kokoro server stderr (tail):")
+        for ln in stderr_tail:
+            print("  " + ln)
     return None
 
 
@@ -590,11 +609,18 @@ def say(text):
         _synth_q.put((sentence, True))
 
 
+_warmed = False   # set once the TTS has been fully heated, so repeat warmup() calls no-op
+
+
 def warmup(progress=None, blocking=False):
     """FULLY heat the active TTS so her first spoken line is instant: start the engine AND
     run one throwaway synthesis — that first synth is what loads the voice and runs the
     first (slow) forward pass, and on a fresh machine it also downloads the weights. Doing
     it now means the first REAL line doesn't pay that cost.
+
+    Idempotent: once warmed, later calls return immediately and print nothing (so a second
+    caller — e.g. joining a Discord VC after the startup warmup — doesn't re-run the synth or
+    re-print "loading voice model...").
 
     `progress(stage:str)` is called with short status strings (for a startup indicator);
     defaults to print. Runs in a background thread unless blocking=True; returns True/False
@@ -603,6 +629,9 @@ def warmup(progress=None, blocking=False):
         (progress or print)(stage)
 
     def _warm():
+        global _warmed
+        if _warmed:
+            return True               # already hot — silent no-op
         try:
             if ENGINE == "kokoro":
                 _log("starting Kokoro voice engine")
@@ -621,6 +650,8 @@ def warmup(progress=None, blocking=False):
                     _ensure_rvc_server()
                 ok = _synth_piper("Voice check.") is not None
             _log("ready" if ok else "warmup synth failed")
+            if ok:
+                _warmed = True
             return ok
         except Exception as e:
             _log(f"warmup error: {e}")

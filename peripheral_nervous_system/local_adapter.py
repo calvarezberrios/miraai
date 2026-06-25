@@ -83,4 +83,8 @@ class LocalAdapter(IOAdapter):
         mouth.wait_until_done()
 
     def warmup(self) -> None:
-        mouth.warmup()
+        # Heat the EARS (STT): load the Whisper model and run one throwaway forward pass so
+        # the first words spoken are transcribed instantly instead of the model cold-loading
+        # while the user talks. (The mouth/TTS is warmed separately at startup.) start() then
+        # reuses the loaded model and just opens the mic.
+        ears.warmup()

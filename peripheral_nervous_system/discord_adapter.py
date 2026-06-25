@@ -339,6 +339,22 @@ class DiscordAdapter(IOAdapter):
         if self._work_thread is not None:
             self._work_thread.join(timeout=5)
 
+    def warmup(self) -> None:
+        """Load the heavy voice-model weights up front (called by the startup warmup) so that
+        when she later joins a voice channel there's no cold load mid-call. Whisper (ears) is
+        loaded and given a first forward pass here; the TTS (mouth) is heated by the startup
+        sequence's voice stage and is idempotent, so the eventual VC join reuses both instead
+        of loading them then. Also pre-binds the modules the join path expects. No-ops cleanly
+        if the voice deps aren't installed (text-only Discord use)."""
+        try:
+            from brain.forebrain.cerebrum.temporal_lobe import wernickes_area
+            from brain.forebrain.cerebrum.frontal_lobe import brocas_area
+        except Exception:
+            return                       # voice stack unavailable -> text-only; nothing to warm
+        self._wernicke = wernickes_area
+        self._brocas = brocas_area
+        wernickes_area.warmup()          # Whisper (ears): load weights + first forward pass
+
     def _loop_pump(self):
         """Keep the asyncio event loop awake while we're in a voice channel.
 

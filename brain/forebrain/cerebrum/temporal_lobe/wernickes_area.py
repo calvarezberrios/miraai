@@ -114,6 +114,31 @@ def transcribe(audio):
     return _transcribe(np.asarray(audio, dtype=np.float32))
 
 
+def warmup():
+    """Load the Whisper model AND run one throwaway forward pass so the FIRST real
+    utterance doesn't pay the cold model-load + first-inference cost. Without this that
+    cost lands WHILE the speaker is mid-sentence (start() only loads the weights; the slow
+    first encode/decode + CUDA kernel compile happen on the first transcribe), which is
+    what makes the very first transcript lag. Safe to call before start(): start() then
+    reuses the loaded model and just opens the mic.
+
+    vad_filter is OFF here so the encoder/decoder actually run on the silent throwaway
+    buffer — with VAD on, pure silence would be skipped and nothing would warm."""
+    _ensure_model()
+    try:
+        segments, _ = _model.transcribe(
+            np.zeros(SAMPLE_RATE, dtype=np.float32),   # 1 s of silence is enough to JIT the path
+            language=LANGUAGE,
+            beam_size=1,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        for _ in segments:                             # the generator is lazy; drain it to run the pass
+            pass
+    except Exception as e:
+        print(f"(wernicke) warmup skipped: {e}")
+
+
 def _worker(on_final, on_partial, on_interrupt, on_prefill=None):
     buf = np.zeros(0, dtype=np.float32)
     last_refresh = 0.0

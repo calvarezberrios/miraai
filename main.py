@@ -1,5 +1,7 @@
 import argparse
 import datetime
+import io
+import re
 import shutil
 import sys
 import threading
@@ -89,7 +91,7 @@ if args.discord:
 else:
     from peripheral_nervous_system.local_adapter import LocalAdapter
     adapter = LocalAdapter()
-    print("Talk to Mira — just speak. (Type 'quit' + Enter to exit; typing a message also works.)\n")
+    print("Mira is starting up — warming the brain, voice, and ears. Please wait to talk...\n")
 
 message_count = 0
 last_consolidation = time.time()
@@ -175,6 +177,63 @@ def describe_situation(event, prev_seen, now):
     return " ".join(parts)
 
 
+# --- TTS text cleanup ----------------------------------------------------------
+# The LLM sometimes uses Markdown-style emphasis like *finally* or **amusing**.
+# Some TTS engines read those literal asterisks aloud, so clean emphasis markers
+# immediately before speech synthesis. Action/gesture beats such as *giggles* or
+# *tail wag* are preserved so the rest of Mira's body/gesture pipeline can still
+# recognize them if needed.
+_TTS_ACTION_CUES = {
+    "giggle", "giggles", "giggling",
+    "laugh", "laughs", "laughing",
+    "chuckle", "chuckles", "chuckling",
+    "smile", "smiles", "smiling", "smirk", "smirks", "smirking", "grin", "grins", "grinning",
+    "blush", "blushes", "blushing",
+    "pout", "pouts", "pouting",
+    "sigh", "sighs", "sighing",
+    "nod", "nods", "nodding", "shake", "shakes", "shaking",
+    "wink", "winks", "winking",
+    "wave", "waves", "waving",
+    "tilt", "tilts", "tilting",
+    "shrug", "shrugs", "shrugging",
+    "huff", "huffs", "huffing",
+    "hmph",
+    "tail", "wag", "wags", "wagging",
+    "ear", "ears", "flick", "flicks", "flicking", "twitch", "twitches", "twitching",
+}
+
+def _is_tts_action_or_gesture(inner_text):
+    """Return True for short action beats that should keep their asterisks.
+
+    Examples kept: *giggles*, *tail wag*, *ears twitch*, *pouts playfully*
+    Examples cleaned: *finally*, **amusing**, *very important*
+    """
+    words = re.findall(r"[a-zA-Z']+", (inner_text or "").lower())
+    if not words or len(words) > 5:
+        return False
+    return any(word in _TTS_ACTION_CUES for word in words)
+
+
+def clean_text_for_tts(text):
+    """Strip Markdown emphasis asterisks unless the starred text is an action beat."""
+    if not text:
+        return text
+
+    def replace_starred(match):
+        stars = match.group("stars")
+        inner = match.group("inner").strip()
+        if _is_tts_action_or_gesture(inner):
+            return f"{stars}{inner}{stars}"
+        return inner
+
+    # Handles *word/phrase* and **word/phrase** without crossing line breaks.
+    return re.sub(
+        r"(?P<stars>\*{1,2})(?P<inner>[^*\n]{1,120}?)(?P=stars)",
+        replace_starred,
+        text,
+    )
+
+
 def _speak_streaming(stream, *, speaker, user_text, source):
     """Speak Mira's reply sentence-by-sentence as the model writes it (called inside
     turn_lock, by speak_reply). Enqueues each sentence the moment it lands so synthesis +
@@ -195,7 +254,7 @@ def _speak_streaming(stream, *, speaker, user_text, source):
             else:
                 print(f" {sentence}", end="", flush=True)
             parts.append(sentence)
-            adapter.speak(sentence)                   # returns fast; the queue does the rest
+            adapter.speak(clean_text_for_tts(sentence))  # TTS gets emphasis-safe text; print/log keeps original
     except Exception as e:
         print(f"\n[stream error: {e}]")
     if parts:
@@ -249,7 +308,7 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
 
             cerebellum.gesture_for_speech(reply)      # gesture only if her words call for one
             adapter.pause_input()                     # don't let her hear herself
-            adapter.speak(reply)
+            adapter.speak(clean_text_for_tts(reply))
 
         adapter.wait_until_done()
         cerebellum.speaking_stopped()                 # close the mouth
@@ -561,34 +620,115 @@ def _clear_mic_line():
     print("\r" + " " * (cols - 1) + "\r", end="", flush=True)
 
 
-def _warm_voice():
-    """Fully load the TTS at startup with a live progress indicator, so her first spoken
-    line is instant instead of paying the cold voice-load (and first-run weight download).
-    Blocks until the voice is hot, printing a spinner + the current stage, then confirms."""
-    state = {"stage": "starting voice engine", "done": False, "ok": False}
+def _warm_all():
+    """Warm all three engines behind ONE progress bar, blocking until everything is hot so the
+    very first turn (hear -> think -> speak) is instant and the user never talks into a cold
+    pipeline. Returns when brain, voice, and ears are all warm:
+      - brain (LLM persona prefill — turbo's first prefill is a ~2 min cold cost)
+      - voice (Kokoro TTS — first synth loads the model / downloads weights)
+      - ears  (Whisper STT — model load + first forward pass)
+    The brain (long pole) warms in the background while voice + ears warm sequentially (kept
+    serial to avoid GPU contention). The bar fills as stages finish; the in-progress stage eases
+    its slice forward over time so the bar keeps moving even though each step is opaque."""
+    # weight = share of the bar; eta = soft estimate used ONLY to animate the in-progress fill
+    # (the slice eases toward its boundary and snaps to full when the stage actually completes).
+    engines = {
+        "brain": {"weight": 0.50, "eta": 90.0, "done": False, "ok": False, "label": "language model"},
+        "voice": {"weight": 0.25, "eta": 12.0, "done": False, "ok": False, "label": "voice engine"},
+        "ears":  {"weight": 0.25, "eta": 8.0,  "done": False, "ok": False, "label": "speech recognition"},
+    }
+    starts = {}
 
-    def progress(stage):
-        state["stage"] = stage
+    def warm_brain():
+        starts["brain"] = time.time()
+        try:
+            prefrontal_cortex.warmup()
+            engines["brain"]["ok"] = True
+        except Exception as e:
+            print(f"\n[brain] warmup error: {e}")
+        engines["brain"]["done"] = True
 
-    def run():
-        state["ok"] = bool(brocas_area.warmup(progress=progress, blocking=True))
-        state["done"] = True
+    def warm_voice_then_ears():
+        # voice first, then ears — serial so they don't fight over the GPU during load.
+        starts["voice"] = time.time()
+        def vprog(stage):
+            engines["voice"]["label"] = stage
+        try:
+            engines["voice"]["ok"] = bool(brocas_area.warmup(progress=vprog, blocking=True))
+        except Exception as e:
+            print(f"\n[voice] warmup error: {e}")
+        engines["voice"]["done"] = True
+        starts["ears"] = time.time()
+        try:
+            adapter.warmup()             # LocalAdapter -> ears.warmup(); no-op for Discord
+            engines["ears"]["ok"] = True
+        except Exception as e:
+            print(f"\n[ears] warmup error: {e}")
+        engines["ears"]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
-    frames = "|/-\\"
-    i = 0
+    # Keep the bar on ONE continuously-redrawn line: send the warmup threads' background log
+    # lines (whisper "loading...", Kokoro "server ready", "brain warmed") into a buffer so they
+    # can't break the bar onto new lines. The bar writes straight to the REAL stdout; the captured
+    # logs are replayed once the bar finishes, so nothing is lost.
+    real_out = sys.stdout
+    real_err = sys.stderr
+    captured = io.StringIO()
+
+    def _draw(text, *, newline=False):
+        cols = shutil.get_terminal_size((100, 20)).columns
+        real_out.write("\r" + text[:cols - 1] + " " * max(0, cols - len(text) - 1) + ("\n" if newline else ""))
+        real_out.flush()
+
     t0 = time.time()
-    while not state["done"]:
+    sys.stdout = captured                          # warmup threads print here, not over the bar
+    sys.stderr = captured                          # ...and their warnings too (HF/torch noise)
+    try:
+        threading.Thread(target=warm_brain, daemon=True).start()
+        threading.Thread(target=warm_voice_then_ears, daemon=True).start()
+
+        width = 30
+        while not all(e["done"] for e in engines.values()):
+            # overall fraction = finished slices + the eased fill of any in-progress slice
+            frac = 0.0
+            for name in ("brain", "voice", "ears"):
+                e = engines[name]
+                if e["done"]:
+                    frac += e["weight"]
+                elif name in starts:
+                    el = time.time() - starts[name]
+                    sub = 1.0 - 0.5 ** (el / e["eta"])  # 0 -> ~1 asymptotically; never quite reaches 1
+                    frac += e["weight"] * min(sub, 0.97)
+            # label: show whatever foreground stage is running (voice/ears), else the brain.
+            if not engines["voice"]["done"]:
+                label = "warming voice — " + engines["voice"]["label"]
+            elif not engines["ears"]["done"]:
+                label = "warming speech recognition"
+            else:
+                label = "warming language model"
+            filled = int(round(width * frac))
+            bar = "█" * filled + "░" * (width - filled)
+            el = int(time.time() - t0)
+            _draw(f"[{bar}] {int(round(frac * 100)):3d}%  {label} ({el}s)")
+            time.sleep(0.1)
+
         el = int(time.time() - t0)
-        line = f"[voice] {frames[i % 4]} {state['stage']}... ({el}s)"
-        print("\r" + line + " " * 8, end="", flush=True)
-        i += 1
-        time.sleep(0.15)
-    el = int(time.time() - t0)
-    if state["ok"]:
-        print("\r[voice] ✓ voice ready in {}s — you can talk now.{}".format(el, " " * 20))
-    else:
-        print("\r[voice] voice warmup didn't complete; she'll load it on first reply.{}".format(" " * 8))
+        _draw(f"[{'█' * width}] 100%  all engines warm in {el}s", newline=True)
+    finally:
+        sys.stdout = real_out
+        sys.stderr = real_err
+
+    # On success the captured output is just warmup noise (HF/torch warnings, "ready"
+    # confirmations) — discard it so the bar stays the only thing on screen. Surface it ONLY
+    # if an engine failed, so the actual error is visible; then note what'll load lazily.
+    failed = [name for name in ("brain", "voice", "ears") if not engines[name]["ok"]]
+    if failed:
+        logs = captured.getvalue().strip()
+        if logs:
+            print("[warmup] details:")
+            for ln in logs.splitlines():
+                print("  " + ln)
+        for name in failed:
+            print(f"[{name}] warmup didn't complete; it'll load on first use.")
 
 
 try:
@@ -607,12 +747,14 @@ try:
     except Exception as e:
         print(f"[avatar not available: {e}]\n")
 
+    # Warm all three engines (brain LLM, voice TTS, ears STT) behind one progress bar BEFORE we
+    # open the ears, so you never talk into a cold pipeline. Until this returns the mic is closed
+    # and there's nothing to type into, so an early word can't get half-transcribed (which is what
+    # made that first transcript lag).
+    _warm_all()
+
+    # Everything's hot — NOW open the ears (the model is already loaded, so the mic opens at once).
     adapter.start(on_event)
-    # Heat the LLM in the background (turbo's first persona prefill is a ~2 min cold cost).
-    threading.Thread(target=prefrontal_cortex.warmup, daemon=True).start()
-    # Fully warm the TTS up front, with a progress indicator + "voice ready" confirmation,
-    # so her first spoken line is instant instead of a long cold load.
-    _warm_voice()
 
     # Bring her subconscious online (only with --subconscious): it listens to everything
     # she overhears, decides when to chime in, and lets her mind wander when it's quiet.
@@ -625,6 +767,13 @@ try:
               "no chime-ins or daydreams]\n")
     else:
         print("[subconscious: OFF — plain STT -> Mira -> TTS, replies when addressed]\n")
+
+    # Everything is loaded and listening — this is the one authoritative "you may talk" signal,
+    # printed only after the brain, voice, and ears are all warm and the mic is open.
+    print("=" * 56)
+    print("  ✓ All set — go ahead and speak or type to Mira now.")
+    print("    (Type 'quit' + Enter to exit.)")
+    print("=" * 56 + "\n")
 
     while True:
         typed = input().strip()
