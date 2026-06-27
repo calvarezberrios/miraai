@@ -22,7 +22,9 @@ param(
     [string]$ModelDir = "D:\models",
     [string]$LlamaDir = "D:\llama-cpp-turboquant",
     [string]$Image    = "nvidia/cuda:12.4.1-devel-ubuntu22.04",
-    [int]   $CtxSize  = 8192
+    [int]   $CtxSize  = 32768   # Qwen3-8B native trained context (no YaRN needed). Fits a
+                                # ~1h40m session in one pass; longer ones auto-chunk in the
+                                # scribe. Raising past 32768 requires --rope-scaling yarn.
 )
 
 $models = @{

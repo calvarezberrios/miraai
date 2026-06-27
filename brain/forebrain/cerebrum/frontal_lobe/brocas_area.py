@@ -59,7 +59,9 @@ KOKORO_VOICE = os.environ.get("MIRA_KOKORO_VOICE", "af_jessica")
 # Language pack for the g2p pipeline. 'a' = American English (matches af_* voices).
 KOKORO_LANG = os.environ.get("MIRA_KOKORO_LANG", "a")
 KOKORO_REPO = os.environ.get("MIRA_KOKORO_REPO", "hexgrad/Kokoro-82M")
-KOKORO_SPEED = os.environ.get("MIRA_KOKORO_SPEED", "1.0")
+# Speaking rate: 1.0 = Kokoro's native pace, <1.0 slower, >1.0 faster. Default 0.92
+# (~8% slower) because her natural delivery runs a touch fast. Tune with MIRA_KOKORO_SPEED.
+KOKORO_SPEED = os.environ.get("MIRA_KOKORO_SPEED", "0.92")
 
 # Python runtime that has kokoro installed (the dedicated 3.10 venv).
 KOKORO_PYTHON = os.environ.get(
@@ -135,7 +137,9 @@ PARAMS = {
     "temperature": 1.0,
     "parallel_infer": False,
     "split_bucket": False,
-    "speed_factor": 1.12,
+    # GPT-SoVITS speed: >1 faster, <1 slower. Default 1.12 (the original tuned pace).
+    # Tune with MIRA_SOVITS_SPEED if you ever want her slower/faster.
+    "speed_factor": float(os.environ.get("MIRA_SOVITS_SPEED", "1.12")),
 }
 SYNTH_TIMEOUT = float(os.environ.get("GPTSOVITS_TIMEOUT", "60"))
 

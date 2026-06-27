@@ -389,8 +389,60 @@ def _llm(system: str, user: str, max_tokens: int, temperature: float = 0.25) -> 
         ],
         max_tokens=max_tokens,
         temperature=temperature,
+        # Honor MIRA_NO_THINK so a reasoning model (Qwen3 turbo) doesn't bury the notes
+        # under a <think> block. No-op on servers/models that ignore it (qwen2.5 on Ollama).
+        extra_body=prefrontal_cortex._EXTRA,
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+# --- context-aware chunking -------------------------------------------------
+# The local model has a fixed context window (llama.cpp n_ctx, default 8192). A long
+# session's transcript can be far bigger than that, so organize/summarize/recap can't
+# send it in one shot — they map over context-sized chunks and reduce the results.
+# Override the window to match your server's -c / n_ctx with MIRA_NOTES_CTX.
+_CTX_TOKENS = int(os.environ.get("MIRA_NOTES_CTX", "8192"))
+
+
+def _est_tokens(text: str) -> int:
+    """Rough token estimate. Transcripts carry timestamps, punctuation, and multi-part
+    speaker names ("Lucien | Torvik || Ryan") that tokenize much denser than prose —
+    measured ~2.7 chars/token here — so we assume 2.6 chars/token and round up. Deliberately
+    pessimistic: better to under-fill the window than overflow it and get a 400."""
+    return max(1, int(len(text) / 2.6) + 1)
+
+
+def _input_budget(system: str, cast_text: str, max_tokens: int) -> int:
+    """How many transcript tokens we can afford in one call: the context window minus the
+    system prompt, the cast block, the reserved output, and a safety margin."""
+    overhead = _est_tokens(system) + _est_tokens(cast_text) + max_tokens + 512
+    return max(512, _CTX_TOKENS - overhead)
+
+
+def _chunk_lines(text: str, budget_tokens: int) -> List[str]:
+    """Split text into chunks each within budget_tokens, never splitting a line. A single
+    line longer than the budget is hard-split as a last resort."""
+    chunks: List[str] = []
+    cur: List[str] = []
+    cur_tok = 0
+    for ln in text.split("\n"):
+        t = _est_tokens(ln)
+        if t > budget_tokens:                      # pathologically long single line
+            if cur:
+                chunks.append("\n".join(cur))
+                cur, cur_tok = [], 0
+            step = max(1, int(budget_tokens * 3.5))
+            for i in range(0, len(ln), step):
+                chunks.append(ln[i:i + step])
+            continue
+        if cur and cur_tok + t > budget_tokens:
+            chunks.append("\n".join(cur))
+            cur, cur_tok = [], 0
+        cur.append(ln)
+        cur_tok += t
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
 
 
 def _transcript_text(transcript: List[Tuple[datetime.datetime, str, str]]) -> str:
@@ -435,9 +487,95 @@ _ORG_TTRPG = (
 )
 
 
+_REDUCE_TTRPG = (
+    "You are the table scribe for a tabletop RPG (TTRPG) session. Below are notes written "
+    "from CONSECUTIVE parts of the SAME session, in order. Merge them into one consolidated "
+    "set of notes, de-duplicating repeated points and keeping events in order. Use exactly "
+    "these markdown sections:\n"
+    "## Cast & Party — 'Player — Character (role/class if known)'.\n"
+    "## Story So Far — the key events, in order.\n"
+    "## NPCs — notable non-player characters and what is known.\n"
+    "## Decisions & Rolls — important choices and notable dice outcomes.\n"
+    "## Quests & Objectives — goals, leads, open threads.\n"
+    "## Loot & Rewards — items, gold, or boons gained.\n"
+    "Be faithful to the notes; do not invent anything. Output only the merged notes."
+)
+
+_REDUCE_DEFAULT = (
+    "Below are notes written from CONSECUTIVE parts of the SAME session, in order. Merge "
+    "them into one clean, de-duplicated set of markdown notes: group related points under "
+    "short ## headings, keep concise bullets, and pull out decisions, questions, and action "
+    "items. Be faithful to the notes; do not invent anything. Output only the merged notes."
+)
+
+
+def _reduce_notes(notes_text: str, profile: str, cast_text: str) -> str:
+    """Merge partial notes (from consecutive transcript chunks) into one document. If the
+    partials themselves overflow the window, merge them in groups and repeat."""
+    system = _REDUCE_TTRPG if profile == "ttrpg" else _REDUCE_DEFAULT
+    budget = _input_budget(system, cast_text, max_tokens=900)
+    guard = 0
+    while _est_tokens(notes_text) > budget and guard < 5:
+        groups = _chunk_lines(notes_text, budget)
+        notes_text = "\n\n".join(
+            _llm(system, cast_text + "Partial notes:\n" + g, max_tokens=600) for g in groups
+        )
+        guard += 1
+    return _llm(system, cast_text + "Partial notes:\n" + notes_text, max_tokens=900)
+
+
 def _organize(transcript_text: str, profile: str, cast_text: str) -> str:
     system = _ORG_TTRPG if profile == "ttrpg" else _ORG_DEFAULT
-    return _llm(system, cast_text + "Transcript:\n" + transcript_text, max_tokens=900)
+    budget = _input_budget(system, cast_text, max_tokens=900)
+    if _est_tokens(transcript_text) <= budget:
+        return _llm(system, cast_text + "Transcript:\n" + transcript_text, max_tokens=900)
+    # Too long for one pass: organize each context-sized chunk, then merge the partials.
+    chunks = _chunk_lines(transcript_text, budget)
+    partials = []
+    for i, ch in enumerate(chunks, 1):
+        part = _llm(system, cast_text + f"Transcript (part {i} of {len(chunks)}):\n" + ch,
+                    max_tokens=600)
+        if part:
+            partials.append(part)
+    if not partials:
+        return ""
+    if len(partials) == 1:
+        return partials[0]
+    return _reduce_notes("\n\n".join(partials), profile, cast_text)
+
+
+_PARTIAL_SUMMARY_SYS = (
+    "You are a note-taker. Faithfully list the key things covered in this part of a session "
+    "as a few concise bullet points — events, decisions, names, and open threads only. Do not "
+    "invent anything; output only the bullets."
+)
+
+
+def _condense_for_summary(transcript_text: str, cast_text: str, budget: int,
+                          temperature: float) -> str:
+    """Collapse an over-long transcript into a small set of faithful bullets that fits the
+    window, so a final summary/recap pass can run over it. Returns the transcript unchanged
+    when it already fits."""
+    if _est_tokens(transcript_text) <= budget:
+        return transcript_text
+    chunks = _chunk_lines(transcript_text, budget)
+    notes = []
+    for i, ch in enumerate(chunks, 1):
+        n = _llm(_PARTIAL_SUMMARY_SYS,
+                 cast_text + f"Transcript (part {i} of {len(chunks)}):\n" + ch,
+                 max_tokens=220, temperature=temperature)
+        if n:
+            notes.append(n)
+    combined = "\n".join(notes)
+    guard = 0
+    while _est_tokens(combined) > budget and guard < 5:
+        groups = _chunk_lines(combined, budget)
+        combined = "\n".join(
+            _llm(_PARTIAL_SUMMARY_SYS, "Notes:\n" + g, max_tokens=220, temperature=temperature)
+            for g in groups
+        )
+        guard += 1
+    return combined
 
 
 def _summarize(transcript_text: str, profile: str, cast_text: str) -> str:
@@ -452,7 +590,9 @@ def _summarize(transcript_text: str, profile: str, cast_text: str) -> str:
             "Summarize this session in 2-5 sentences: the main subject, the key points, and "
             "any decisions or action items. Be faithful and concise; third person."
         )
-    out = _llm(system, cast_text + "Transcript:\n" + transcript_text, max_tokens=220, temperature=0.3)
+    budget = _input_budget(system, cast_text, max_tokens=220)
+    body = _condense_for_summary(transcript_text, cast_text, budget, temperature=0.3)
+    out = _llm(system, cast_text + "Transcript:\n" + body, max_tokens=220, temperature=0.3)
     return "" if out.upper().startswith("NOTHING") else out
 
 
@@ -472,7 +612,9 @@ def _recap() -> str:
         f"things covered, then a final line 'Summary: <one sentence>'. {who}"
         "Be faithful — only what was actually said. Keep it brief."
     )
-    body = _llm(system, cast_text + "Transcript:\n" + transcript_text, max_tokens=320, temperature=0.3)
+    budget = _input_budget(system, cast_text, max_tokens=320)
+    body_in = _condense_for_summary(transcript_text, cast_text, budget, temperature=0.3)
+    body = _llm(system, cast_text + "Transcript:\n" + body_in, max_tokens=320, temperature=0.3)
     return "[Recap so far]\n" + body
 
 

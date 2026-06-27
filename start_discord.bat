@@ -18,6 +18,13 @@ REM memory embeddings -> THIS desktop's own Ollama nomic-embed-text (:11434), NO
 set MIRA_EMBED_BASE_URL=http://localhost:11434/v1
 set MIRA_MODEL=turbo
 set MIRA_NO_THINK=1
+REM Match the scribe's note-chunking budget to the laptop brain's served context
+REM (run-mira-small.ps1 -c). Keep these two in sync if you change the server's -c.
+set MIRA_NOTES_CTX=32768
+REM TTS engine. Now that the LLM lives on the laptop, the desktop GPU is free for the
+REM higher-quality GPT-SoVITS voice (zero-shot cloned from the reference clip). Start its
+REM server FIRST with start_sovits_server.bat. Fall back any time with: set MIRA_TTS=kokoro
+set MIRA_TTS=gptsovits
 REM STT on the desktop GPU. GTX 1660 / Turing has a BROKEN fp16 path (-> NaN), so use
 REM int8_float16. If that still errors, drop to WHISPER_COMPUTE_TYPE=int8. Only switch to
 REM distil-large-v3 + float16 on a GPU with a working fp16 path (e.g. the RTX 5050 laptop).

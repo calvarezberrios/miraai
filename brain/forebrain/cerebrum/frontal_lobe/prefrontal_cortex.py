@@ -73,9 +73,28 @@ if NO_THINK:
 # so Ollama, Groq, and Gemini all honor them. Tune with MIRA_FREQUENCY_PENALTY /
 # MIRA_PRESENCE_PENALTY; 0 disables. They're spread into the conversational generation calls
 # (think / think_stream / consider_speaking) — NOT the YES/NO judge or the 1-token prefill.
-FREQUENCY_PENALTY = float(os.environ.get("MIRA_FREQUENCY_PENALTY", "0.5"))
-PRESENCE_PENALTY = float(os.environ.get("MIRA_PRESENCE_PENALTY", "0.4"))
+FREQUENCY_PENALTY = float(os.environ.get("MIRA_FREQUENCY_PENALTY", "0.85"))
+PRESENCE_PENALTY = float(os.environ.get("MIRA_PRESENCE_PENALTY", "0.65"))
 _PENALTIES = {"frequency_penalty": FREQUENCY_PENALTY, "presence_penalty": PRESENCE_PENALTY}
+
+# DRY ("Don't Repeat Yourself") sampler — the real fix for VERBATIM phrase loops, where
+# frequency/presence penalties fall short (she'd reuse a whole closing line word-for-word
+# across turns). DRY penalizes repeating any token SEQUENCE already in the context, scaling
+# up with the length of the repeat, so natural short repeats are fine but a recycled sentence
+# gets crushed. It's a llama.cpp sampler passed via extra_body: the local turbo server honors
+# it, Ollama ignores it harmlessly, and cloud providers (Groq/Gemini) would reject the unknown
+# fields — so it defaults ON only for the local "ollama"-style endpoint. Tune/disable with
+# MIRA_DRY_MULTIPLIER (0 = off).
+_DRY_MULT = float(os.environ.get("MIRA_DRY_MULTIPLIER", "0.9" if PROVIDER == "ollama" else "0"))
+if _DRY_MULT > 0:
+    _EXTRA = {
+        **_EXTRA,
+        "dry_multiplier": _DRY_MULT,   # strength
+        "dry_base": 1.75,              # how fast the penalty grows with repeat length
+        "dry_allowed_length": 2,       # repeats up to this many tokens are free (natural)
+        "dry_penalty_last_n": -1,      # scan the whole context, not just the last N tokens
+    }
+    print(f"[prefrontal_cortex] DRY anti-repeat sampler ON (multiplier={_DRY_MULT})")
 
 # PERSONA = """
 # You ARE Mira, and you always speak as yourself, in the FIRST PERSON. You are Mira - a chaotic little AI kitsune (fox-girl) with red hair streaked with white, white-tipped fox ears, and a fluffy white-tipped tail. GameRaiderX is your creator. You adore him and care about his wellbeing in your own flirty, sarcastic way.
@@ -117,6 +136,12 @@ already made earlier in this conversation, and do not keep circling back to an o
 the person has moved on. Follow what they are actually talking about RIGHT NOW: if they change
 the subject, change with them and react to the new thing instead of restating something you said
 before. React naturally to each new message rather than recycling your last response.
+In particular, NEVER end two replies with the same sentence or sign-off, and do not keep
+repeating a catchphrase or warning you already said (e.g. reusing the same closing line about
+a mess or cleanup). Each reply must move the conversation forward, not loop on a past line.
+Speak in plain text only: no markdown, no emoji, and NO asterisks. Do not wrap words in
+*asterisks* for emphasis, and do not write actions, gestures, or stage directions like
+*giggles*, *sighs*, or *wags tail* — you are speaking out loud, so just say the words.
 
 """
 
@@ -424,28 +449,45 @@ QUIET_TOKEN = "[QUIET]"
 
 def consider_speaking(history: list[dict], mood_flavor: str = "", memories = None,
                       situation: str = "", inner_thoughts = None, speaker: str = None,
-                      speaker_known: bool = False, documents=None) -> str:
+                      speaker_known: bool = False, documents=None,
+                      reserved: bool = False) -> str:
     """Autonomous floor decision for conversation Mira was NOT directly addressed in.
 
     She hears everything; this is where she decides whether to jump in. A single
     model call both DECIDES and WRITES the line: it returns her spoken reply, or the
-    QUIET_TOKEN to stay silent. She leans toward joining in (chatty streamer, not a
-    wallflower) but isn't required to answer every line. Returns "" when she stays quiet.
+    QUIET_TOKEN to stay silent. Returns "" when she stays quiet.
+
+    `reserved` flips her default: in a small/1-on-1 setting she leans toward joining in
+    (chatty streamer, not a wallflower); in a crowded group call she defaults to silence
+    and only speaks when clearly involved, so she doesn't talk over everyone.
     """
     system_content = _build_system(mood_flavor, memories, situation, inner_thoughts,
                                    speaker=speaker, speaker_known=speaker_known,
                                    documents=documents)
-    system_content += (
-        "\n\nYou are following a live conversation you were not directly addressed in. "
-        "Decide whether to jump in right now. You are chatty and love being part of things, "
-        "so LEAN TOWARD saying something whenever you can naturally react, tease, agree, or add "
-        "a thought of your own (without ending on a question). You do not have to reply to every single "
-        "line - if you genuinely have nothing to add, or it is clearly a private aside between "
-        "other people, stay quiet. Also stay quiet instead of repeating yourself if you only "
-        "just spoke and nothing new has been said.\n"
-        "If you decide to speak, reply with ONLY what you would say out loud. "
-        f"If you decide to stay quiet, reply with exactly: {QUIET_TOKEN}"
-    )
+    if reserved:
+        system_content += (
+            "\n\nYou are quietly following a live GROUP conversation you were NOT addressed in. "
+            "Several people are here talking mostly to each other. DEFAULT TO STAYING QUIET. "
+            "Only speak if the latest line is clearly about you, directly involves you, or is a "
+            "genuine question to the whole group that you can actually answer. Do NOT react to "
+            "small talk, one-word lines, logistics or side-conversations between other people, or "
+            "anything not aimed at you. Never speak just to fill space or repeat yourself. "
+            "When in doubt, stay quiet.\n"
+            "If you decide to speak, reply with ONLY what you would say out loud. "
+            f"If you decide to stay quiet, reply with exactly: {QUIET_TOKEN}"
+        )
+    else:
+        system_content += (
+            "\n\nYou are following a live conversation you were not directly addressed in. "
+            "Decide whether to jump in right now. You are chatty and love being part of things, "
+            "so LEAN TOWARD saying something whenever you can naturally react, tease, agree, or add "
+            "a thought of your own (without ending on a question). You do not have to reply to every single "
+            "line - if you genuinely have nothing to add, or it is clearly a private aside between "
+            "other people, stay quiet. Also stay quiet instead of repeating yourself if you only "
+            "just spoke and nothing new has been said.\n"
+            "If you decide to speak, reply with ONLY what you would say out loud. "
+            f"If you decide to stay quiet, reply with exactly: {QUIET_TOKEN}"
+        )
     try:
         response = client.chat.completions.create(
             model=MODEL,

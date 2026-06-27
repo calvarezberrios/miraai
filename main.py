@@ -46,6 +46,14 @@ CONSOLIDATE_EVERY_MESSAGES = 95       # consolidate after this many messages...
 CONSOLIDATE_EVERY_SECONDS = 30 * 60   # ...or this long, whichever comes first
 LOG_HEARD = True                      # print messages she hears but doesn't answer
 
+# --- voice chime-in restraint (keeps her from blurting at every speaker) -------
+CHIME_COOLDOWN_SEC = 25               # after an unaddressed chime-in, stay quiet (unless
+                                      # named/@'d) for this long so she doesn't chain-reply
+CHIME_MIN_WORDS = 4                   # skip the chime-in decision on fragments shorter than
+                                      # this (content-free STT bits like "Okay." / "them.")
+CROWD_HUMAN_COUNT = 3                 # a voice call with >= this many humans -> reserved mode:
+                                      # she stays quiet unless clearly involved
+
 INTERRUPT_NOTE = (
     " The viewer has been talking for a long time without pausing. "
     "Playfully interrupt them mid-thought with a short reaction to what "
@@ -115,6 +123,16 @@ def run_consolidation():
 
 
 _last_seen = {}   # chan_key -> timestamp of the previous inbound message
+_last_chime = {}  # chan_key -> timestamp of her last unaddressed chime-in (cooldown)
+
+
+def _too_thin_to_chime(text):
+    """A content-free STT fragment ("Okay.", "Well", "them.", "phone.") isn't worth a
+    chime-in. Gauge by word count: anything shorter than CHIME_MIN_WORDS real words is
+    treated as background chatter she should just listen to. Only used on the UNADDRESSED
+    voice path — a line aimed at her by name never reaches here."""
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    return len(words) < CHIME_MIN_WORDS
 
 
 def _humanize_gap(seconds):
@@ -177,36 +195,60 @@ def describe_situation(event, prev_seen, now):
     return " ".join(parts)
 
 
-# --- TTS text cleanup ----------------------------------------------------------
-# The LLM sometimes uses Markdown-style emphasis like *finally* or **amusing**.
-# Some TTS engines read those literal asterisks aloud, so clean emphasis markers
-# immediately before speech synthesis. Action/gesture beats such as *giggles* or
-# *tail wag* are preserved so the rest of Mira's body/gesture pipeline can still
-# recognize them if needed.
+# --- asterisk cleanup (TTS + display) ------------------------------------------
+# The LLM puts asterisks around two very different things:
+#   1. EMPHASIS — *finally*, **amusing**, *very important*. Meant to italicize/bold, but
+#      a plain terminal and the TTS engine just render/say the literal asterisks. We strip
+#      the asterisks and KEEP the word everywhere (it's part of what she's saying).
+#   2. ACTION / GESTURE beats — *snickers*, *sighs*, *tail wag*. Stage directions, not
+#      speech. TTS must NOT say them; the terminal keeps them (as *...*) as a readout of
+#      what her body is doing, and the avatar/gesture pipeline still reads them.
+# So: TTS drops action beats and unwraps emphasis; display unwraps emphasis and keeps
+# action beats. The split hinges on _is_tts_action_or_gesture below.
 _TTS_ACTION_CUES = {
-    "giggle", "giggles", "giggling",
-    "laugh", "laughs", "laughing",
-    "chuckle", "chuckles", "chuckling",
+    # facial / expressive
     "smile", "smiles", "smiling", "smirk", "smirks", "smirking", "grin", "grins", "grinning",
-    "blush", "blushes", "blushing",
-    "pout", "pouts", "pouting",
-    "sigh", "sighs", "sighing",
-    "nod", "nods", "nodding", "shake", "shakes", "shaking",
-    "wink", "winks", "winking",
-    "wave", "waves", "waving",
-    "tilt", "tilts", "tilting",
-    "shrug", "shrugs", "shrugging",
-    "huff", "huffs", "huffing",
-    "hmph",
-    "tail", "wag", "wags", "wagging",
+    "frown", "frowns", "frowning", "pout", "pouts", "pouting", "beam", "beams", "beaming",
+    "blush", "blushes", "blushing", "wince", "winces", "wincing", "cringe", "cringes",
+    "glare", "glares", "glaring", "stare", "stares", "staring", "gawk", "gawks",
+    "wink", "winks", "winking", "bat", "bats", "batting", "flutter", "flutters",
+    "roll", "rolls", "rolling", "narrow", "narrows", "widen", "widens",
+    # vocalizations (laughed/voiced beats the LLM loves to emit)
+    "giggle", "giggles", "giggling", "laugh", "laughs", "laughing",
+    "chuckle", "chuckles", "chuckling", "snicker", "snickers", "snickering",
+    "cackle", "cackles", "cackling", "scoff", "scoffs", "scoffing",
+    "gasp", "gasps", "gasping", "groan", "groans", "groaning", "moan", "moans",
+    "sigh", "sighs", "sighing", "huff", "huffs", "huffing", "hmph",
+    "purr", "purrs", "purring", "growl", "growls", "growling", "hum", "hums", "humming",
+    "snort", "snorts", "snorting", "sniff", "sniffs", "gulp", "gulps", "gasps",
+    "cough", "coughs", "yawn", "yawns", "yawning", "whine", "whines", "whimper", "whimpers",
+    "ahem", "tsk",
+    # body / motion
+    "nod", "nods", "nodding", "shake", "shakes", "shaking", "shrug", "shrugs", "shrugging",
+    "wave", "waves", "waving", "tilt", "tilts", "tilting", "cock", "cocks", "cocking",
+    "lean", "leans", "leaning", "point", "points", "pointing",
+    "gesture", "gestures", "gesturing", "cross", "crosses", "crossing",
+    "tap", "taps", "tapping", "clap", "claps", "clapping", "snap", "snaps", "snapping",
+    "fold", "folds", "raise", "raises", "lower", "lowers", "flash", "flashes",
+    "bow", "bows", "curtsy", "stretch", "stretches", "wiggle", "wiggles",
+    "twirl", "twirls", "spin", "spins", "perk", "perks", "perking",
+    "boop", "boops", "nuzzle", "nuzzles", "pounce", "pounces", "flop", "flops",
+    "grab", "grabs", "throw", "throws", "toss", "tosses",
+    # kitsune-specific
+    "tail", "tails", "wag", "wags", "wagging", "swish", "swishes", "swishing",
     "ear", "ears", "flick", "flicks", "flicking", "twitch", "twitches", "twitching",
 }
 
-def _is_tts_action_or_gesture(inner_text):
-    """Return True for short action beats that should keep their asterisks.
+# *word/phrase* and **word/phrase**, not crossing line breaks. Inner capped so a stray
+# lone asterisk in a long line can't swallow the rest of the sentence.
+_STAR_RE = re.compile(r"(?P<stars>\*{1,2})(?P<inner>[^*\n]{1,120}?)(?P=stars)")
 
-    Examples kept: *giggles*, *tail wag*, *ears twitch*, *pouts playfully*
-    Examples cleaned: *finally*, **amusing**, *very important*
+
+def _is_tts_action_or_gesture(inner_text):
+    """True for a short action/gesture beat (so TTS drops it and the terminal keeps it).
+
+    Examples (action): *snickers*, *sighs*, *tail wag*, *ears twitch*, *pouts playfully*
+    Examples (emphasis): *finally*, **amusing**, *very important*, *please*
     """
     words = re.findall(r"[a-zA-Z']+", (inner_text or "").lower())
     if not words or len(words) > 5:
@@ -214,24 +256,35 @@ def _is_tts_action_or_gesture(inner_text):
     return any(word in _TTS_ACTION_CUES for word in words)
 
 
+def _tidy(text):
+    """Collapse the doubled spaces / stranded punctuation left when a beat is removed."""
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)   # " ," -> ","  after a dropped action
+    text = re.sub(r"[ \t]{2,}", " ", text)          # "Oh,  fine" -> "Oh, fine"
+    return text.strip()
+
+
 def clean_text_for_tts(text):
-    """Strip Markdown emphasis asterisks unless the starred text is an action beat."""
+    """Text to SPEAK: drop action/gesture beats entirely, unwrap emphasis to the bare word."""
     if not text:
         return text
 
-    def replace_starred(match):
-        stars = match.group("stars")
-        inner = match.group("inner").strip()
-        if _is_tts_action_or_gesture(inner):
-            return f"{stars}{inner}{stars}"
-        return inner
+    def repl(m):
+        inner = m.group("inner").strip()
+        return "" if _is_tts_action_or_gesture(inner) else inner
 
-    # Handles *word/phrase* and **word/phrase** without crossing line breaks.
-    return re.sub(
-        r"(?P<stars>\*{1,2})(?P<inner>[^*\n]{1,120}?)(?P=stars)",
-        replace_starred,
-        text,
-    )
+    return _tidy(_STAR_RE.sub(repl, text))
+
+
+def clean_text_for_display(text):
+    """Text to PRINT/LOG: unwrap emphasis to the bare word, keep action beats as *...*."""
+    if not text:
+        return text
+
+    def repl(m):
+        stars, inner = m.group("stars"), m.group("inner").strip()
+        return f"{stars}{inner}{stars}" if _is_tts_action_or_gesture(inner) else inner
+
+    return _tidy(_STAR_RE.sub(repl, text))
 
 
 def _speak_streaming(stream, *, speaker, user_text, source):
@@ -244,20 +297,27 @@ def _speak_streaming(stream, *, speaker, user_text, source):
     tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
     adapter.pause_input()                             # don't let her hear herself
     parts = []
+    gestured = False
+    printed_tag = False
     try:
         for sentence in stream:
             if not (sentence and sentence.strip()):
                 continue
-            if not parts:
-                print(f"{tag}: {sentence}", end="", flush=True)
-                cerebellum.gesture_for_speech(sentence)   # first sentence sets the gesture
-            else:
-                print(f" {sentence}", end="", flush=True)
-            parts.append(sentence)
-            adapter.speak(clean_text_for_tts(sentence))  # TTS gets emphasis-safe text; print/log keeps original
+            if not gestured:
+                cerebellum.gesture_for_speech(sentence)   # first real chunk sets the gesture
+                gestured = True
+            spoken = clean_text_for_tts(sentence)            # what she SAYS: no actions, no *'s
+            shown = clean_text_for_display(sentence)         # what we PRINT/LOG: *actions* kept
+            if shown:
+                print(f"{tag}: {shown}" if not printed_tag else f" {shown}",
+                      end="", flush=True)
+                printed_tag = True
+                parts.append(shown)
+            if spoken and spoken.strip():
+                adapter.speak(spoken)
     except Exception as e:
         print(f"\n[stream error: {e}]")
-    if parts:
+    if printed_tag:
         print()                                       # close the streamed line
     return " ".join(parts).strip()
 
@@ -296,21 +356,23 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
                 remember_reply(reply)
                 observe(user_text if user_text is not None else "", reply, speaker=speaker)
         else:
+            # Print/log keep emphasis stripped + *actions* visible; memory follows what's shown.
+            shown = clean_text_for_display(reply)
             if not is_daydream:
-                remember_reply(reply)
-                observe(user_text if user_text is not None else "", reply, speaker=speaker)
+                remember_reply(shown)
+                observe(user_text if user_text is not None else "", shown, speaker=speaker)
 
             if is_daydream:
-                print(f"\nMira (daydream, {amygdala.mood}): {reply}\n")
+                print(f"\nMira (daydream, {amygdala.mood}): {shown}\n")
             else:
                 if speaker and user_text is not None:
                     print(f"\n{speaker}: {user_text}")
                 tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
-                print(f"{tag}: {reply}\n")
+                print(f"{tag}: {shown}\n")
 
-            cerebellum.gesture_for_speech(reply)      # gesture only if her words call for one
+            cerebellum.gesture_for_speech(reply)      # gesture from raw text (action words intact)
             adapter.pause_input()                     # don't let her hear herself
-            adapter.speak(clean_text_for_tts(reply))
+            adapter.speak(clean_text_for_tts(reply))  # SAY: no actions, no asterisks
 
         adapter.wait_until_done()
         cerebellum.speaking_stopped()                 # close the mouth
@@ -554,14 +616,30 @@ def handle_message(event, interrupting=False):
         # named, so SHE decides whether to chime in on what was said — joining if it's
         # relevant or about her, staying quiet otherwise. One call both decides and writes
         # the line (returns "" to stay silent).
+        #
+        # Two cheap gates run first so she doesn't blurt at every utterance in a busy room:
+        #   1. content gate — skip tiny STT fragments ("Okay.", "Well", "them.") outright.
+        #   2. cooldown — right after she chimes in, stay quiet for a beat instead of
+        #      chain-replying to each person in turn. (Being named/@'d is the 'addressed'
+        #      path above and bypasses this entirely, so she stays responsive when wanted.)
+        last_chime = _last_chime.get(chan_key)
+        in_cooldown = last_chime is not None and (now - last_chime) < CHIME_COOLDOWN_SEC
+        if _too_thin_to_chime(event.text) or in_cooldown:
+            if LOG_HEARD:
+                print(f"[heard] {event.speaker}: {event.text}")
+            return
         memories, ident_speaker, speaker_known, documents = _recall_for(event)
         if previous_session:
             memories = [f"From our last session: {previous_session}"] + memories
         situation = describe_situation(event, prev_seen, now)
+        # In a crowd (group call) she defaults to silence; a small/1-on-1 call stays chatty.
+        crowded = _vc_human_count(event) >= CROWD_HUMAN_COUNT
         line = prefrontal_cortex.consider_speaking(
             context, color(), memories, situation=situation,
-            speaker=ident_speaker, speaker_known=speaker_known, documents=documents)
+            speaker=ident_speaker, speaker_known=speaker_known, documents=documents,
+            reserved=crowded)
         if line:
+            _last_chime[chan_key] = now
             speak_reply(line, user_text=event.text, channel=chan_key,
                         speaker=event.speaker, source="chime-in")
         elif LOG_HEARD:
