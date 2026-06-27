@@ -33,6 +33,18 @@ $models = @{
 }
 $Model = $models[$Size]
 
+# Auto-detect host. The D:\ defaults above are the desktop's. This laptop has no D:
+# drive and keeps everything on C: (and needs the Blackwell-era CUDA 12.8 image for
+# its sm_120 GPU). If D:\ is absent and the user didn't override a path/image, fall
+# back to the laptop layout. Explicit -ModelDir/-LlamaDir/-Image still win; the
+# desktop is unaffected because D:\ exists there.
+if (-not (Test-Path 'D:\')) {
+    if (-not $PSBoundParameters.ContainsKey('ModelDir')) { $ModelDir = 'C:\models' }
+    if (-not $PSBoundParameters.ContainsKey('LlamaDir')) { $LlamaDir = 'C:\llama-cpp-turboquant' }
+    if (-not $PSBoundParameters.ContainsKey('Image'))    { $Image    = 'nvidia/cuda:12.8.0-devel-ubuntu22.04' }
+    Write-Host "No D:\ drive detected -- using laptop paths ($ModelDir, $LlamaDir) and the 12.8 image." -ForegroundColor DarkCyan
+}
+
 if (-not (Test-Path (Join-Path $ModelDir $Model))) {
     Write-Warning "Model not found: $(Join-Path $ModelDir $Model)"
     Write-Host  "Download it first:  ./download-small.ps1 -Size $Size" -ForegroundColor Yellow
