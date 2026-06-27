@@ -217,8 +217,12 @@ def _start_kokoro_server():
         # warnings and its own "[kokoro] pipeline ready" diagnostics would otherwise stomp on
         # the startup progress bar. A daemon thread drains it (so the pipe can't fill and block
         # the server) into a small ring buffer we only surface if the server fails to come up.
+        # encoding="utf-8": the text we send can contain non-Latin1 characters (e.g. 'ō' in
+        # "Ohayō"); without this the pipe defaults to Windows cp1252 and the write raises
+        # 'charmap' codec can't encode ... . The server side reconfigures its stdin to match.
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, bufsize=1)
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", bufsize=1)
     except Exception as e:
         print("[brocas_area] failed to launch Kokoro server:", e)
         return None
@@ -474,6 +478,11 @@ def _synthesize(text):
 
 _lip_cb = None                  # type: Optional[Callable[[float], None]]
 _LIP_HOP = 0.03                 # seconds per envelope frame (~33 Hz)
+# Output latency to compensate (mouth/caption vs. sound): used as a fallback when sounddevice
+# can't report the live stream latency. Tune with MIRA_LIP_LATENCY (seconds).
+_LIP_LATENCY = float(os.environ.get("MIRA_LIP_LATENCY", "0.05"))
+
+_subtitle_cb = None             # type: Optional[Callable[[str, float], None]]
 
 
 def set_lip_callback(cb):
@@ -481,6 +490,23 @@ def set_lip_callback(cb):
     """Register a sink for lip-sync levels (0..1). None disables lip-sync."""
     global _lip_cb
     _lip_cb = cb
+
+
+def set_subtitle_callback(cb):
+    # type: (Optional[Callable[[str, float], None]]) -> None
+    """Register a sink for subtitles: cb(text, duration_seconds), called when a line STARTS
+    playing so the caption reveals word-by-word across the audio. None disables subtitles."""
+    global _subtitle_cb
+    _subtitle_cb = cb
+
+
+def _emit_subtitle(text, duration):
+    # type: (Optional[str], float) -> None
+    if _subtitle_cb is not None and text:
+        try:
+            _subtitle_cb(text, float(duration))
+        except Exception:
+            pass
 
 
 def _rms_envelope(data, sr):
@@ -501,8 +527,8 @@ def _rms_envelope(data, sr):
     return [min(1.0, (l / peak) * 1.3) for l in levels]
 
 
-def _start_lip_thread(data, sr):
-    # type: (np.ndarray, int) -> Optional[threading.Event]
+def _start_lip_thread(data, sr, start_delay=0.0):
+    # type: (np.ndarray, int, float) -> Optional[threading.Event]
     if _lip_cb is None:
         return None
     levels = _rms_envelope(data, sr)
@@ -511,17 +537,20 @@ def _start_lip_thread(data, sr):
     stop = threading.Event()
 
     def _run():
-        t0 = time.time()
+        # Each envelope frame idx is emitted at t0 + idx*HOP, where t0 includes the output
+        # latency (start_delay) so the mouth opens with the SOUND, not before it leaves the
+        # device. Sleeping BEFORE the emit (vs. after) keeps it aligned to that schedule.
+        t0 = time.time() + max(0.0, start_delay)
         for idx, level in enumerate(levels):
             if stop.is_set():
                 break
+            ahead = (t0 + idx * _LIP_HOP) - time.time()
+            if ahead > 0:
+                time.sleep(ahead)
             try:
                 _lip_cb(level)
             except Exception:
                 pass
-            ahead = (t0 + (idx + 1) * _LIP_HOP) - time.time()
-            if ahead > 0:
-                time.sleep(ahead)
         try:
             _lip_cb(0.0)
         except Exception:
@@ -531,15 +560,15 @@ def _start_lip_thread(data, sr):
     return stop
 
 
-def lip_drive_bytes(wav_bytes):
-    # type: (bytes) -> Optional[threading.Event]
-    """Start lip-sync from raw WAV bytes (Discord voice path plays via ffmpeg)."""
-    if _lip_cb is None:
-        return None
+def lip_drive_bytes(wav_bytes, text=None):
+    # type: (bytes, Optional[str]) -> Optional[threading.Event]
+    """Start lip-sync (and emit the caption) from raw WAV bytes (Discord voice path plays via
+    ffmpeg). `text` is the line being spoken, shown as a subtitle across the clip's duration."""
     try:
         data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
     except Exception:
         return None
+    _emit_subtitle(text, (len(data) / sr) if sr else 0.0)
     return _start_lip_thread(data, sr)
 
 
@@ -547,11 +576,20 @@ def lip_drive_bytes(wav_bytes):
 # Playback (local mic/speaker mode only; Discord plays via ffmpeg into the VC)
 # ---------------------------------------------------------------------------
 
-def _play(wav_bytes):
-    # type: (bytes) -> None
+def _play(wav_bytes, text=None):
+    # type: (bytes, Optional[str]) -> None
     data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
-    stop = _start_lip_thread(data, sr)
+    duration = (len(data) / sr) if sr else 0.0
     sd.play(data, sr)
+    # Align the mouth (and caption) with the actual audio onset: sounddevice reports the
+    # output stream's latency — the gap between play() and the first sample reaching the
+    # speaker. Compensating it stops the lips running ahead of the sound.
+    try:
+        latency = float(sd.get_stream().latency)
+    except Exception:
+        latency = _LIP_LATENCY
+    stop = _start_lip_thread(data, sr, start_delay=latency)
+    _emit_subtitle(text, duration)
     sd.wait()
     if stop is not None:
         stop.set()
@@ -571,7 +609,7 @@ def _synth_worker():
         try:
             audio = _synthesize(text)
             if audio and should_play:
-                _play_q.put(audio)
+                _play_q.put((audio, text))      # carry the text so playback can caption it
         except Exception as e:
             print("[brocas_area] synth error:", e)
         finally:
@@ -580,9 +618,9 @@ def _synth_worker():
 
 def _play_worker():
     while True:
-        audio = _play_q.get()
+        audio, text = _play_q.get()
         try:
-            _play(audio)
+            _play(audio, text)
         except Exception as e:
             print("[brocas_area] playback error:", e)
         finally:

@@ -20,6 +20,8 @@
 param(
     [ValidateSet('8b','4b')][string]$Size = '8b',
     [string]$ModelDir = "D:\models",
+    [string]$LlamaDir = "D:\llama-cpp-turboquant",
+    [string]$Image    = "nvidia/cuda:12.4.1-devel-ubuntu22.04",
     [int]   $CtxSize  = 8192
 )
 
@@ -43,9 +45,9 @@ docker rm -f llama-turbo 2>$null | Out-Null
 docker run -d --name llama-turbo `
   --gpus all --ulimit memlock=-1 --cap-add=IPC_LOCK `
   -p 8080:8080 `
-  -v D:\llama-cpp-turboquant:/llama `
+  -v ${LlamaDir}:/llama `
   -v ${ModelDir}:/models `
-  nvidia/cuda:12.4.1-devel-ubuntu22.04 `
+  $Image `
   /llama/build/bin/llama-server `
     -m /models/$Model `
     --host 0.0.0.0 --port 8080 `
@@ -66,7 +68,7 @@ for ($i = 0; $i -lt 48; $i++) {
 }
 if (-not $ready) { Write-Warning "Did not become ready -- check: docker logs llama-turbo"; return }
 
-$ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like "Wi-Fi*" -or $_.InterfaceAlias -like "Ethernet*" } | Select-Object -First 1).IPAddress
+$ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { ($_.InterfaceAlias -like "Wi-Fi*" -or $_.InterfaceAlias -like "Ethernet*") -and $_.IPAddress -notlike "169.254.*" -and $_.PrefixOrigin -eq "Dhcp" } | Select-Object -First 1).IPAddress
 Write-Host "`nBRAIN SERVER READY ($Size)." -ForegroundColor Green
 Write-Host "Browser UI:        http://localhost:8080" -ForegroundColor Green
 Write-Host "Laptop / Mira ->   http://${ip}:8080/v1" -ForegroundColor Green

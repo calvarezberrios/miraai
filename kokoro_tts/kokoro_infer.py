@@ -129,6 +129,14 @@ def run_server(args):
 
 
 if __name__ == "__main__":
+    # The parent (brocas_area) talks to us over stdin/stdout pipes in UTF-8; request text may
+    # contain non-Latin1 characters (e.g. 'ō'). Reconfigure our std streams so decoding the
+    # request and printing OK/READY/ERR never hit a Windows cp1252 codec error.
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = parse_args()
     try:
         if args.serve:

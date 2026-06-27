@@ -982,7 +982,7 @@ class DiscordAdapter(IOAdapter):
                 brocas = self._brocas
                 wav = brocas._synthesize(sentence) if brocas else None
                 if wav:
-                    self._voice_play_q.put(wav)
+                    self._voice_play_q.put((wav, sentence))   # carry text for the caption
             except Exception as e:
                 print(f"[Discord voice] synth error: {e}")
             finally:
@@ -991,11 +991,12 @@ class DiscordAdapter(IOAdapter):
     def _voice_play_worker(self):
         """Play synthesized sentences into the VC in order, one at a time."""
         while self._running:
-            wav = self._voice_play_q.get()
+            item = self._voice_play_q.get()
             try:
-                if wav is _STOP:
+                if item is _STOP:
                     break
-                self._play_wav_in_vc(wav)   # blocks until this sentence finishes
+                wav, sentence = item
+                self._play_wav_in_vc(wav, sentence)   # blocks until this sentence finishes
             except Exception as e:
                 print(f"[Discord voice] play error: {e}")
             finally:
@@ -1007,7 +1008,7 @@ class DiscordAdapter(IOAdapter):
         self._voice_synth_q.join()
         self._voice_play_q.join()
 
-    def _play_wav_in_vc(self, wav_bytes):
+    def _play_wav_in_vc(self, wav_bytes, text=None):
         vc = self._voice_client
         discord = self._discord
         if vc is None or not vc.is_connected() or discord is None or self._loop is None:
@@ -1030,7 +1031,7 @@ class DiscordAdapter(IOAdapter):
                 vc.stop()
             vc.play(source, after=_after)
 
-        lip_stop = self._brocas.lip_drive_bytes(wav_bytes)   # move the mouth in time
+        lip_stop = self._brocas.lip_drive_bytes(wav_bytes, text)   # move the mouth + caption in time
         try:
             asyncio.run_coroutine_threadsafe(_do_play(), self._loop).result(timeout=15)
             done.wait(timeout=120)

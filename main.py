@@ -283,11 +283,13 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
     # her private subconscious_log. Real replies and chime-ins do get logged.
     is_daydream = source == "daydream"
     with turn_lock:
+        cerebellum.talking()                          # body: she's speaking now (talking motion)
         if streaming:
             # Low-latency: speak each sentence the instant it's generated, then assemble
             # the full line. (Daydreams/chime-ins/pre-drafted replies pass a plain string.)
             reply = _speak_streaming(reply, speaker=speaker, user_text=user_text, source=source)
             if not (reply and reply.strip()):
+                cerebellum.go_idle()                  # nothing spoken -> back to idle
                 adapter.resume_input()                # _speak_streaming paused the ears
                 return
             if not is_daydream:
@@ -312,6 +314,7 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
 
         adapter.wait_until_done()
         cerebellum.speaking_stopped()                 # close the mouth
+        cerebellum.go_idle()                          # body: done speaking -> idle stance
         if interrupting:
             adapter.flush_input()                     # drop the ramble she just answered
         adapter.resume_input()
@@ -589,6 +592,11 @@ def on_event(ev):
             text = "..." + text[-(avail - 3):]      # keep the tail (newest words)
         line = prefix + text
         print("\r" + line + " " * max(0, cols - len(line) - 1), end="", flush=True)
+        # The viewer is talking and she's listening (and drafting, if enabled) -> thinking pose.
+        # Deduped in the cerebellum, so this only emits once per listening stretch. (Her ears are
+        # paused while she speaks, so partials never arrive mid-reply to fight the talking motion.)
+        if not scribe.is_active():
+            cerebellum.thinking()
         # She listens AND drafts at the same time: each partial refines a reply that
         # will be ready the instant the speaker stops. (Not while taking notes — then
         # she only listens, so there's no draft and the subconscious is paused.)
@@ -611,6 +619,9 @@ def on_event(ev):
         # of the same transcript showing again underneath it.
         _clear_mic_line()
         handle_message(ev)
+        # If that turn made her speak, speak_reply already returned her to idle (no-op here);
+        # if it didn't (e.g. an overheard line), clear the lingering thinking pose.
+        cerebellum.go_idle()
 
 
 def _clear_mic_line():
@@ -744,6 +755,7 @@ try:
         # there's no display — capture the avatar by opening the exposed port.
         motor_cortex.start(open_browser=not args.discord)
         brocas_area.set_lip_callback(cerebellum.lip)   # TTS speech energy -> mouth
+        brocas_area.set_subtitle_callback(motor_cortex.subtitle)  # spoken line -> word-by-word caption
     except Exception as e:
         print(f"[avatar not available: {e}]\n")
 

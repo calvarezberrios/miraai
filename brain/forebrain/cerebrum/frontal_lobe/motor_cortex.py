@@ -36,11 +36,28 @@ AVATAR_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  "..", "..", "..", "..", "avatar")
 )
-# Bind address/port for the avatar web server. Defaults are fine for local use;
-# on a server (e.g. RunPod) set MIRA_AVATAR_HOST=0.0.0.0 so the port can be
-# exposed and captured in OBS over the network.
-HOST = os.environ.get("MIRA_AVATAR_HOST", "127.0.0.1")
+# Bind address/port for the avatar web server. Default 0.0.0.0 = listen on ALL interfaces, so
+# the renderer can be opened from another machine on the LAN (e.g. view/capture it on the
+# desktop while the brain runs on the laptop). Set MIRA_AVATAR_HOST=127.0.0.1 to restrict it
+# to this machine only.
+HOST = os.environ.get("MIRA_AVATAR_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MIRA_AVATAR_PORT", "8234"))
+
+
+def _lan_ip() -> Optional[str]:
+    """Best-effort primary LAN IPv4 of this machine, for the 'open it on another device' URL.
+    Opens a UDP socket toward a public IP to pick the outbound interface (no packets are
+    actually sent); returns None if it can't determine one."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return None
 
 # VRM1 expression presets we drive. three-vrm maps VRM0 blendshape groups onto
 # these same names (joy->happy, sorrow->sad, fun->relaxed, a->aa), so one set of
@@ -59,11 +76,13 @@ MOOD_MAP: Dict[str, Dict[str, float]] = {
     "flirty":  {"happy": 0.6, "relaxed": 0.4},
 }
 
-# Friendly gesture names the browser knows (see GESTURES in avatar/index.html).
-# "idle" is the resting loop and plays automatically; the rest are one-shots.
+# Persistent activity STATES the browser knows (set via set_state; see STATE_CLIPS in
+# avatar/index.html). idle/talking are procedural living motion; thinking is a looping clip.
+STATES = ("idle", "talking", "thinking")
+# One-shot GESTURES the browser knows (played via play_gesture; see GESTURES in index.html).
+# Fired by what she's saying, they blend in over the current state and auto-return to it.
 GESTURES = (
-    "idle", "talking", "wave", "thinking", "clapping", "flirty",
-    "surprised", "angry", "sad", "jump", "sleepy", "look",
+    "wave", "clapping", "flirty", "surprised", "angry", "sad", "jump", "sleepy", "look",
 )
 
 # --- server state -----------------------------------------------------------
@@ -141,11 +160,19 @@ def _run_server(open_browser: bool):
         await site.start()
 
     _loop.run_until_complete(_boot())
-    url = f"http://{HOST}:{PORT}/"
-    print(f"[motor_cortex] avatar server on {url}")
+    local_url = f"http://127.0.0.1:{PORT}/"
+    print(f"[motor_cortex] avatar server on {local_url}")
+    # Listening on all interfaces -> also surface the LAN URL to open from another device.
+    if HOST in ("0.0.0.0", "::", ""):
+        ip = _lan_ip()
+        if ip:
+            print(f"[motor_cortex] also reachable on your network at http://{ip}:{PORT}/ "
+                  f"- open that URL in a browser on the desktop")
+            print(f"[motor_cortex] (if the desktop can't reach it, allow Python through "
+                  f"Windows Firewall on Private networks)")
     if open_browser:
         try:
-            webbrowser.open(url)
+            webbrowser.open(local_url)        # always open the loopback URL locally
         except Exception:
             pass
     _started.set()
@@ -236,14 +263,32 @@ def lipsync(level: float) -> None:
 
 
 def play_gesture(name: str) -> None:
-    """Play a one-shot body gesture, then auto-return to the idle loop.
+    """Play a one-shot body gesture, then auto-return to the current state.
 
-    Name is one of GESTURES (wave, thinking, clapping, flirty, talking, ...).
-    Unknown names are ignored by the renderer.
+    Name is one of GESTURES (wave, clapping, flirty, surprised, ...). Unknown names are
+    ignored by the renderer.
     """
     if not name:
         return
     _emit({"type": "gesture", "name": str(name)})
+
+
+def set_state(name: str) -> None:
+    """Set Mira's persistent body activity in the renderer: 'idle', 'talking', or 'thinking'.
+    idle/talking are procedural living motion (talking tracks her voice); thinking plays a
+    looping clip. The renderer blends from her current pose, so a change never snaps. Unknown
+    names are ignored; no-op-safe if the avatar isn't up.
+    """
+    if name:
+        _emit({"type": "state", "name": str(name)})
+
+
+def subtitle(text: str, duration: float = 0.0) -> None:
+    """Show a caption under the avatar, revealed word-by-word across `duration` seconds (the
+    spoken line's audio length) so it tracks the voice. Called by brocas_area as each line
+    starts playing. Empty text clears it. No-op-safe if the avatar isn't up.
+    """
+    _emit({"type": "subtitle", "text": str(text or ""), "dur": float(duration or 0.0)})
 
 
 if __name__ == "__main__":

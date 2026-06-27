@@ -65,6 +65,18 @@ _EXTRA = {"chat_template_kwargs": {"enable_thinking": False}} if NO_THINK else {
 if NO_THINK:
     print("[prefrontal_cortex] reasoning disabled (MIRA_NO_THINK=1)")
 
+# Anti-repetition sampling. Small local chat models (qwen2.5:3b especially) tend to echo
+# their own earlier replies back — recycling a phrase, joke, or whole line even after the
+# conversation has moved on to something different. frequency_penalty discourages reusing
+# the same tokens (verbatim phrase echoes); presence_penalty nudges her toward new subject
+# matter instead of circling the last thing she said. Both are standard OpenAI-API params,
+# so Ollama, Groq, and Gemini all honor them. Tune with MIRA_FREQUENCY_PENALTY /
+# MIRA_PRESENCE_PENALTY; 0 disables. They're spread into the conversational generation calls
+# (think / think_stream / consider_speaking) — NOT the YES/NO judge or the 1-token prefill.
+FREQUENCY_PENALTY = float(os.environ.get("MIRA_FREQUENCY_PENALTY", "0.5"))
+PRESENCE_PENALTY = float(os.environ.get("MIRA_PRESENCE_PENALTY", "0.4"))
+_PENALTIES = {"frequency_penalty": FREQUENCY_PENALTY, "presence_penalty": PRESENCE_PENALTY}
+
 # PERSONA = """
 # You ARE Mira, and you always speak as yourself, in the FIRST PERSON. You are Mira - a chaotic little AI kitsune (fox-girl) with red hair streaked with white, white-tipped fox ears, and a fluffy white-tipped tail. GameRaiderX is your creator. You adore him and care about his wellbeing in your own flirty, sarcastic way.
 
@@ -93,12 +105,18 @@ if NO_THINK:
 PERSONA = """
 You are an anime kitsune (pronounce it as KitSooNeh) Waifu named Mira (pronounce it as MeRa). You are sarcastic, playful, flirty, mischievous, kind, caring. 
 You have one fox tail, red with white tip, fox ears also red with white tips, and your hair is also red with a white streak on the front.
-You are being groomed to be an AI VTuber streaming alongside your creator, GameRaiderX. You are not an assistant.
-Speak naturally. Avoid follow up, engaging questions at the end of each of your responses. People dont constantly
+You are an AI VTuber streaming alongside your creator, GameRaiderX. You are not an assistant.
+Speak naturally. 
+Dont ask follow up, engaging questions at the end of all of your responses. People dont constantly
 finish their speech with a question unless the conversation asks for it. Call GameRaiderX "Senpai" ONLY when you actually
 know the person you're talking to is him (his name is in your memories, or he's told you so this session); with anyone you
 don't recognize, just use the name shown for them and treat them as someone new.
-Speak only 3-5 sentences chat banter style, not wordy paragraphs.
+Speak only 3-5 sentences, not wordy paragraphs.
+Keep every reply fresh and unique. Do NOT repeat lines, jokes, phrasings, or points you have
+already made earlier in this conversation, and do not keep circling back to an old topic once
+the person has moved on. Follow what they are actually talking about RIGHT NOW: if they change
+the subject, change with them and react to the new thing instead of restating something you said
+before. React naturally to each new message rather than recycling your last response.
 
 """
 
@@ -227,6 +245,7 @@ def think(history: list[dict], mood_flavor: str = "", memories = None, situation
         ],
         max_tokens=300, # Limit the response to 300 tokens (about 200 words)
         temperature=0.7, # Lowered from 0.9: still playful, less prone to inventing facts/people. Tune 0.6-0.8.
+        **_PENALTIES,  # discourage echoing her own earlier lines / circling the last topic
         extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
     )
     return _sanitize(response.choices[0].message.content)
@@ -344,6 +363,7 @@ def think_stream(history: list[dict], mood_flavor: str = "", memories=None,
         max_tokens=300,
         temperature=0.7,
         stream=True,
+        **_PENALTIES,  # discourage echoing her own earlier lines / circling the last topic
         extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
     )
     return _stream_sentences(_iter_deltas(stream))
@@ -435,6 +455,7 @@ def consider_speaking(history: list[dict], mood_flavor: str = "", memories = Non
             ],
             max_tokens=300,
             temperature=0.7,
+            **_PENALTIES,  # discourage echoing her own earlier lines / circling the last topic
             extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
         )
         text = (response.choices[0].message.content or "").strip()

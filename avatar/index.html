@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mira</title>
   <style>
-    :root { --chroma: #00b140; }            /* OBS chroma-key green */
-    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--chroma); }
+    /* Transparent background — OBS Browser Source captures the page alpha directly, so no
+       chroma key is needed (keying green would also key out Mira's green eyes). */
+    html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
     #stage { width: 100vw; height: 100vh; display: block; }
     #hud {
       position: fixed; left: 8px; bottom: 8px; font: 12px/1.4 monospace;
@@ -15,11 +16,34 @@
       display: none;
     }
     #hud.hide { display: none; }
+
+    /* Subtitles — centered on Mira, pinned to the bottom, wrapping inside the window.
+       White letters with a bold red outline (paint-order keeps the fill crisp on top of the
+       stroke); a soft shadow lifts them off any background since the page is transparent. */
+    #subs {
+      position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%);
+      width: min(90vw, 1100px); box-sizing: border-box; padding: 0 2vw;
+      text-align: center; line-height: 1.22;
+      font-family: 'Segoe UI', 'Arial Rounded MT Bold', system-ui, sans-serif;
+      font-weight: 800; font-size: clamp(22px, 4vw, 48px); letter-spacing: .4px;
+      color: #fff;
+      -webkit-text-stroke: 4px #e01f3d;          /* Mira's bold red outline */
+      paint-order: stroke fill;
+      text-shadow: 0 2px 5px rgba(0,0,0,.55), 0 0 2px rgba(0,0,0,.4);
+      pointer-events: none; user-select: none;
+      overflow-wrap: break-word; word-break: break-word;
+      opacity: 0; transition: opacity .18s ease;
+    }
+    #subs.show { opacity: 1; }
+    /* karaoke reveal: upcoming words sit dim until the audio reaches them, spoken words pop. */
+    #subs .sub-w { opacity: .32; transition: opacity .12s ease; }
+    #subs .sub-w.spoken { opacity: 1; }
   </style>
 </head>
 <body>
   <canvas id="stage"></canvas>
   <div id="hud">booting…</div>
+  <div id="subs" aria-live="polite"></div>
 
   <!-- All deps are vendored locally under /node_modules (npm install in avatar/). -->
   <script type="importmap">
@@ -60,6 +84,91 @@
     scene.add(key);
     scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
+    // --- positioning rig: drag to move Mira, scroll to resize her ------------
+    // The avatar is parented to this group; the user moves/scales the GROUP (not the camera),
+    // so dragging slides her around the stage like an OBS layer and the wheel sizes her in the
+    // window. The placement is saved to localStorage so it survives reloads / OBS restarts.
+    const rig = new THREE.Group();
+    scene.add(rig);
+    let rigScale = 1;
+    const XKEY = 'mira.xform';
+
+    function setRigScale(s) {
+      rigScale = Math.max(0.25, Math.min(4, s));
+      rig.scale.setScalar(rigScale);
+    }
+    function saveXform() {
+      try {
+        localStorage.setItem(XKEY, JSON.stringify({
+          x: rig.position.x, y: rig.position.y, s: rigScale, ry: rig.rotation.y, rx: rig.rotation.x,
+        }));
+      } catch {}
+    }
+    function loadXform() {
+      try {
+        const j = JSON.parse(localStorage.getItem(XKEY) || 'null');
+        if (j) {
+          rig.position.set(j.x || 0, j.y || 0, 0);
+          rig.rotation.set(j.rx || 0, j.ry || 0, 0);
+          setRigScale(j.s || 1);
+        }
+      } catch {}
+    }
+    function resetXform() { rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0); setRigScale(1); saveXform(); }
+    loadXform();
+
+    // World units per screen pixel at Mira's depth, so a drag moves her 1:1 with the cursor.
+    function worldPerPixel() {
+      const d = Math.abs(camera.position.z - rig.position.z) || 1.9;
+      const vh = 2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+      return vh / Math.max(1, renderer.domElement.clientHeight);
+    }
+
+    // LEFT-drag = move her around, RIGHT-drag = rotate (turn left/right + tilt), wheel = resize,
+    // double-click = reset. The placement (position, rotation, scale) all persist.
+    const ROT_SPEED = 0.01, MAX_PITCH = 0.6;   // radians per pixel; clamp forward/back tilt
+    let dragMode = null, lastX = 0, lastY = 0;
+    canvas.style.cursor = 'grab';
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.button === 0) dragMode = 'pan';
+      else if (e.button === 2) dragMode = 'rotate';
+      else return;
+      lastX = e.clientX; lastY = e.clientY;
+      canvas.style.cursor = dragMode === 'rotate' ? 'move' : 'grabbing';
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!dragMode) return;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      if (dragMode === 'pan') {
+        const wpp = worldPerPixel();
+        rig.position.x += dx * wpp;                 // follow the cursor horizontally...
+        rig.position.y -= dy * wpp;                 // ...and vertically (screen Y is flipped)
+      } else {                                       // rotate
+        rig.rotation.y += dx * ROT_SPEED;           // drag left/right to turn her around
+        rig.rotation.x = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, rig.rotation.x + dy * ROT_SPEED));
+      }
+      lastX = e.clientX; lastY = e.clientY;
+      saveXform();
+    });
+    const endDrag = (e) => {
+      if (!dragMode) return;
+      dragMode = null; canvas.style.cursor = 'grab';
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    };
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());   // let right-drag rotate
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const old = rigScale;
+      setRigScale(rigScale * Math.exp(-e.deltaY * 0.0015));    // scroll up = bigger, down = smaller
+      rig.position.y += (old - rigScale) * 0.7;                // anchor zoom at mid-body, not her feet
+      saveXform();
+    }, { passive: false });
+    canvas.addEventListener('dblclick', resetXform);
+    console.log('[mira-avatar] left-drag move, right-drag rotate, scroll resize, double-click reset');
+
     // --- expression state (face = mood + lipsync; bones = gestures) ---------
     const EXPR = ['neutral', 'happy', 'angry', 'sad', 'relaxed', 'surprised'];
     const MOUTH = 'aa';
@@ -67,14 +176,23 @@
     for (const e of [...EXPR, MOUTH]) { target[e] = 0; value[e] = 0; }
     target.neutral = 1;
 
-    // --- gesture catalogue: friendly name -> VRMA filename stem -------------
+    // --- animation catalogue ------------------------------------------------
+    // STATE_CLIPS: looping "what is she doing right now" animations driven by a clip.
+    //   thinking = played (looping) while the viewer is talking and she's drafting a reply.
+    //   (idle and talking are PROCEDURAL — see the render loop — so they read as living,
+    //    voice-reactive motion that blends smoothly instead of a canned loop that snaps.)
+    // GESTURES: one-shot body gestures fired by what she's SAYING (a greeting -> wave, ...).
+    const STATE_CLIPS = { thinking: 'Thinking' };
     const GESTURES = {
-      idle: 'Relax', talking: 'LookAround', wave: 'Goodbye', thinking: 'Thinking',
-      clapping: 'Clapping', flirty: 'Blush', surprised: 'Surprised', angry: 'Angry',
-      sad: 'Sad', jump: 'Jump', sleepy: 'Sleepy', look: 'LookAround',
+      wave: 'Goodbye', clapping: 'Clapping', flirty: 'Blush', surprised: 'Surprised',
+      angry: 'Angry', sad: 'Sad', jump: 'Jump', sleepy: 'Sleepy', look: 'LookAround',
     };
-    const IDLE = 'idle';
-    const FADE = 0.45;
+    const FADE = 0.4;
+
+    // current persistent activity, set by motor_cortex over the socket.
+    let baseMode = 'idle';            // 'idle' | 'talking' | 'thinking'
+    let baseClip = null;              // looping action when the base is a clip (thinking); else null
+    let talkEnergy = 0;               // smoothed speech loudness -> livelier, voice-driven talking
 
     // --- relaxed standing rest pose -----------------------------------------
     // Idle is NOT a looping clip (those snapped on loop and tilted her head
@@ -93,7 +211,7 @@
     // Grab the body FAST when a gesture starts (so the clip's full arm motion
     // plays, not a half-raise fought by the rest pose), and ease back to rest
     // SLOWLY so the return doesn't snap.
-    const GESTURE_IN = 0.12, GESTURE_OUT = 0.5;
+    const GESTURE_IN = 0.22, GESTURE_OUT = 0.5;   // ease into a clip (not a pop), ease out slowly
     let restEnabled = true, fadeOut = null;
     let idleT = 0;                        // idle-motion clock (breathing + sway)
     const _q = new THREE.Quaternion(), _e = new THREE.Euler();
@@ -114,7 +232,7 @@
       VRMUtils.combineSkeletons(gltf.scene);
       VRMUtils.rotateVRM0(vrm);
       vrm.scene.traverse((o) => { o.frustumCulled = false; });
-      scene.add(vrm.scene);
+      rig.add(vrm.scene);            // parented to the rig so drag/zoom move + size her
 
       humanoid = vrm.humanoid;
       // Capture the model's bind pose so a gesture can always blend the whole
@@ -133,11 +251,15 @@
 
       mixer = new THREE.AnimationMixer(vrm.scene);
       mixer.addEventListener('finished', (e) => {
-        // A one-shot gesture ended: let it hold its last frame while the rest-
-        // pose blend (gestureWeight -> 0) eases the whole body back to standing,
-        // then it gets stopped in the render loop. No snap to a new clip.
-        if (e.action === currentGesture) { fadeOut = e.action; currentGesture = null; }
-        else { e.action.stop(); }
+        // A one-shot gesture ended: let it hold its last frame while we ease back to the base.
+        // If the base is a looping clip (thinking) bring it back under the finishing gesture;
+        // otherwise the procedural rest pose (idle/talking) takes over via gestureWeight -> 0.
+        if (e.action === currentGesture) {
+          fadeOut = e.action; currentGesture = null;
+          if (baseMode === 'thinking') startBaseClip('thinking', e.action);
+        } else if (e.action !== baseClip) {
+          e.action.stop();
+        }
       });
 
       await loadGestures();
@@ -153,7 +275,7 @@
     async function loadGestures() {
       const aLoader = new GLTFLoader();
       aLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
-      const names = [...new Set(Object.entries(GESTURES))];   // [name, stem] pairs
+      const names = [...Object.entries(STATE_CLIPS), ...Object.entries(GESTURES)];  // [name, stem] pairs
       await Promise.all(names.map(async ([name, stem]) => {
         try {
           const g = await aLoader.loadAsync(`/animations/${stem}.vrma`);
@@ -163,18 +285,51 @@
       }));
     }
 
+    // Start (or restart) a looping STATE clip as the base motion, blending in from `fromAction`
+    // (a finishing gesture or the previous base) so it grows out of her current pose, no snap.
+    function startBaseClip(name, fromAction) {
+      const clip = clips[name];
+      if (!mixer || !clip) return;
+      const action = mixer.clipAction(clip);
+      action.reset();
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = false;
+      action.enabled = true;
+      action.play();
+      if (fromAction && fromAction !== action) action.crossFadeFrom(fromAction, FADE, true);
+      baseClip = action;
+    }
+
+    // Set her persistent activity. idle/talking are procedural (render loop); thinking is a
+    // looping clip. Every change blends from her CURRENT pose — the gestureWeight ramp covers
+    // procedural<->clip and mixer crossfades cover clip<->clip — so nothing ever snaps.
+    function setState(mode) {
+      if (mode === baseMode) return;
+      const prev = baseMode;
+      baseMode = mode;
+      if (mode === 'thinking') {
+        startBaseClip('thinking', currentGesture || baseClip);   // blend in from current pose
+      } else if (prev === 'thinking' && baseClip) {
+        // leaving the clip base -> let it fade out as the procedural pose (idle/talking) returns.
+        fadeOut = baseClip;
+        baseClip.fadeOut(FADE);
+        baseClip = null;
+      }
+      // idle <-> talking is purely a procedural intensity change, handled in the render loop.
+    }
+
     function playGesture(name) {
-      if (!mixer || name === IDLE) return;          // idle is the procedural rest pose
+      if (!mixer) return;
       const clip = clips[name];
       if (!clip) { console.warn('[mira-avatar] unknown gesture:', name); return; }
       const action = mixer.clipAction(clip);
       action.reset();
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
-      // rest -> gesture is cushioned by the gestureWeight ramp (render loop), so
-      // it blends from her current pose. gesture -> gesture (rare) crossfades the
-      // clips directly. Either way: no snap to the clip's first frame.
-      if (currentGesture && currentGesture !== action) action.crossFadeFrom(currentGesture, FADE, true);
+      // blend in from whatever currently drives the body — another one-shot, the base clip, or
+      // (via the gestureWeight ramp) the procedural pose — so it never snaps to the clip's frame 0.
+      const from = currentGesture || baseClip;
+      if (from && from !== action) action.crossFadeFrom(from, FADE, true);
       action.play();
       currentGesture = action;
     }
@@ -188,6 +343,50 @@
       return true;
     }
 
+    // --- subtitles ----------------------------------------------------------
+    // A line arrives as {text, dur}: dur is the audio length, so we reveal the words across it
+    // (karaoke style) — each word lights up as the voice reaches it. Word timing is weighted by
+    // word length (longer words take proportionally longer), which tracks speech better than an
+    // even split. A new line supersedes the old one via a generation token; the last line holds
+    // briefly then fades.
+    const subsEl = document.getElementById('subs');
+    let subGen = 0, subClearTimer = null;
+    function showSubtitle(text, dur) {
+      const gen = ++subGen;
+      if (subClearTimer) { clearTimeout(subClearTimer); subClearTimer = null; }
+      const words = (text || '').trim().split(/\s+/).filter(Boolean);
+      if (!words.length) { subsEl.classList.remove('show'); return; }
+
+      subsEl.innerHTML = '';
+      const spans = words.map((w) => {
+        const s = document.createElement('span');
+        s.className = 'sub-w';
+        s.textContent = w;
+        subsEl.appendChild(s);
+        subsEl.appendChild(document.createTextNode(' '));
+        return s;
+      });
+      subsEl.classList.add('show');
+
+      const D = Math.max(0.4, dur || words.length * 0.34);      // seconds to reveal the whole line
+      const total = words.reduce((a, w) => a + w.length + 1, 0);
+      let acc = 0;
+      const at = words.map((w) => { const t = (acc / total) * D; acc += w.length + 1; return t; });
+      const start = performance.now();
+
+      function step() {
+        if (gen !== subGen) return;                            // a newer line replaced this one
+        const e = (performance.now() - start) / 1000;
+        for (let i = 0; i < spans.length; i++) spans[i].classList.toggle('spoken', e >= at[i]);
+        if (e < D) requestAnimationFrame(step);
+        else {
+          for (const s of spans) s.classList.add('spoken');
+          subClearTimer = setTimeout(() => { if (gen === subGen) subsEl.classList.remove('show'); }, 1500);
+        }
+      }
+      requestAnimationFrame(step);
+    }
+
     // --- WebSocket from motor_cortex ---------------------------------------
     function connect() {
       const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -198,8 +397,12 @@
         if (msg.type === 'blendshapes' && msg.values) {
           for (const [k, v] of Object.entries(msg.values))
             if (k in target) target[k] = Math.max(0, Math.min(1, v));
+        } else if (msg.type === 'state' && msg.name) {
+          setState(msg.name);
         } else if (msg.type === 'gesture' && msg.name) {
           playGesture(msg.name);
+        } else if (msg.type === 'subtitle') {
+          showSubtitle(msg.text || '', msg.dur || 0);
         }
       };
     }
@@ -214,8 +417,12 @@
     // or keep the window visible.
     let last = performance.now();
     function renderFrame(dt) {
-      for (const e of [...EXPR, MOUTH])
+      // Expressions ease gently; the MOUTH viseme tracks its target almost immediately so the
+      // lips stay tight to the audio (the speech envelope is already smoothed upstream — a slow
+      // lerp here was adding visible lag between sound and mouth).
+      for (const e of EXPR)
         value[e] += (target[e] - value[e]) * Math.min(1, dt * 12);
+      value[MOUTH] += (target[MOUTH] - value[MOUTH]) * Math.min(1, dt * 38);
 
       blinkTimer += dt;
       let blink = 0;
@@ -233,8 +440,14 @@
       // rest -> gesture and gesture -> rest — is a smooth blend from her current
       // position rather than a snap. With no gesture this holds her standing
       // calmly and facing the camera (only breathing + blink move).
+      // Speech energy: a smoothed mouth-open level, used so the talking motion tracks her
+      // actual voice (livelier on a loud syllable, calmer in a pause). Only while talking.
+      talkEnergy += ((baseMode === 'talking' ? (value[MOUTH] || 0) : 0) - talkEnergy)
+                    * Math.min(1, dt * 6);
+
       if (humanoid && restEnabled) {
-        const want = currentGesture ? 1 : 0;
+        // A clip is "active" if a one-shot gesture OR a looping base clip (thinking) is playing.
+        const want = (currentGesture || baseClip) ? 1 : 0;
         const tau = want ? GESTURE_IN : GESTURE_OUT;     // fast in, slow out
         gestureWeight += (want - gestureWeight) * Math.min(1, dt / tau);
         const restAmt = 1 - gestureWeight;
@@ -247,23 +460,37 @@
           const hips = humanoid.getNormalizedBoneNode('hips');
           if (hips) hips.position.lerp(bindHips, restAmt);
 
-          // ...then add gentle, organic life on top (scaled by restAmt so it
-          // fades out under a gesture). Layered slow sines at unrelated rates
-          // make it non-repetitive — breathing, a slow head drift, a faint sway.
+          // ...then layer LIVING motion on top (scaled by restAmt so it fades under a clip).
+          // Idle is no longer barely-there: a clear breath, a slow side-to-side weight shift,
+          // and wandering head motion keep her alive even in silence. Talking adds livelier,
+          // voice-driven head movement and gentle hand gesticulation on top of that.
           idleT += dt;
           const a = restAmt;
-          const breathe  = Math.sin(idleT * 0.8) * 0.05;                          // chest rise/fall
-          const headNod  = Math.sin(idleT * 0.45) * 0.025 + Math.sin(idleT * 0.19) * 0.02;
-          const headTurn = Math.sin(idleT * 0.33) * 0.05;
-          const headTilt = Math.sin(idleT * 0.27) * 0.025;
-          const armSway  = Math.sin(idleT * 0.4) * 0.03 + Math.sin(idleT * 0.17) * 0.02;
+          const talk = talkEnergy;                                   // 0..~1 while speaking
+
+          const breathe  = Math.sin(idleT * 0.9) * 0.07;             // chest rise/fall (bigger)
+          const sway     = Math.sin(idleT * 0.33) * 0.06;            // hips/torso weight-shift
+          const headNod  = Math.sin(idleT * 0.5) * 0.045 + Math.sin(idleT * 0.21) * 0.03
+                           + talk * Math.sin(idleT * 3.1) * 0.10;    // extra nods in time w/ voice
+          const headTurn = Math.sin(idleT * 0.37) * 0.085
+                           + talk * Math.sin(idleT * 1.7) * 0.06;
+          const headTilt = Math.sin(idleT * 0.27) * 0.045;
+          const armSway  = Math.sin(idleT * 0.43) * 0.045 + Math.sin(idleT * 0.17) * 0.03;
+          // hand "talking": forearms lift/turn a little in time with the voice (offset L/R).
+          const gestL    = talk * (0.5 + 0.5 * Math.sin(idleT * 2.5)) * 0.18;
+          const gestR    = talk * (0.5 + 0.5 * Math.sin(idleT * 2.5 + Math.PI)) * 0.18;
+
           if (!addLocal('chest', breathe * a, 0, 0)) addLocal('spine', breathe * a, 0, 0);
+          addLocal('spine', 0, sway * a * 0.4, 0);
+          addLocal('hips', 0, 0, sway * a * 0.35);
           addLocal('head', headNod * a, headTurn * a, headTilt * a);
-          addLocal('leftUpperArm', 0, 0, -armSway * a);
-          addLocal('rightUpperArm', 0, 0,  armSway * a);
+          addLocal('leftUpperArm',  -gestL * a, 0, -armSway * a);
+          addLocal('rightUpperArm', -gestR * a, 0,  armSway * a);
+          addLocal('leftLowerArm',  0, -gestL * a, 0);
+          addLocal('rightLowerArm', 0,  gestR * a, 0);
         }
-        // gesture fully faded back to rest -> free the clamped action
-        if (!currentGesture && gestureWeight < 0.02 && fadeOut) { fadeOut.stop(); fadeOut = null; }
+        // base clip / gesture fully faded back to procedural rest -> free the clamped action
+        if (!currentGesture && !baseClip && gestureWeight < 0.02 && fadeOut) { fadeOut.stop(); fadeOut = null; }
       }
 
       if (vrm) {
@@ -294,13 +521,19 @@
     // Debug hook so tooling can inspect/drive the avatar headlessly.
     window.__mira = {
       state: () => ({
+        base: baseMode,
         gesture: currentGesture ? currentGesture.getClip().name : null,
         clips: Object.keys(clips),
         expr: { ...value },
-        gestureWeight, restEnabled,
+        gestureWeight, restEnabled, talkEnergy,
         hidden: document.hidden,
       }),
       play: (n) => playGesture(n),
+      setState: (m) => setState(m),       // 'idle' | 'talking' | 'thinking'
+      // Placement: left-drag move, right-drag rotate, scroll resize, double-click reset (or use these).
+      place: (x, y, s) => { rig.position.set(x || 0, y || 0, 0); if (s) setRigScale(s); saveXform(); },
+      rotate: (ry, rx) => { rig.rotation.set(rx || 0, ry || 0, 0); saveXform(); },   // radians (yaw, pitch)
+      resetPlacement: resetXform,
       // Live-tune the rest pose, e.g. __mira.setRest('leftUpperArm', 0, 0, -1.3)
       setRest: (name, x, y, z) => { POSE[name] = E(x, y, z); },
     };
@@ -311,12 +544,15 @@
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    // Debug keys: 1-6 expressions, 0 reset; q/w/e/r/t/y/u gestures.
+    // Debug keys: 1-6 expressions, 0 reset; z/x/c states (idle/talking/thinking); q/e/r/y/u gestures.
     addEventListener('keydown', (e) => {
       const ex = { '1': 'happy', '2': 'angry', '3': 'sad', '4': 'relaxed', '5': 'surprised', '6': 'aa' };
-      const ge = { q: 'wave', w: 'thinking', e: 'clapping', r: 'flirty', t: 'talking', y: 'surprised', u: 'jump' };
+      const ge = { q: 'wave', e: 'clapping', r: 'flirty', y: 'surprised', u: 'jump', i: 'look' };
       if (e.key === '0') { for (const x of [...EXPR, MOUTH]) target[x] = 0; target.neutral = 1; }
       else if (e.key === 'p') { restEnabled = !restEnabled; }   // toggle arms-down rest pose
+      else if (e.key === 'z') setState('idle');
+      else if (e.key === 'x') setState('talking');
+      else if (e.key === 'c') setState('thinking');
       else if (ex[e.key]) { for (const x of [...EXPR, MOUTH]) target[x] = 0; target[ex[e.key]] = 1; }
       else if (ge[e.key]) playGesture(ge[e.key]);
     });
