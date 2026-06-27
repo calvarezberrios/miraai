@@ -1,4 +1,32 @@
-# Split setup: brain on the desktop PC, Mira on the laptop
+# Split setup (brain ⇄ Mira over the LAN)
+
+> **⚠ REVERSED as of 2026-06-27.** The turbo LLM now runs on the **laptop** (RTX 5050,
+> 8 GB Blackwell — a fast dense model fits entirely in VRAM) and **Mira runs on the
+> desktop**. This is the opposite of the "Original layout" documented below.
+>
+> ```
+> Laptop (192.168.12.116)                     Desktop (GTX 1660 / 24 GB)
+>   llama.cpp turbo  :8080  <----LAN chat----  Mira: STT + TTS + avatar + Discord + brain calls
+>                                              Ollama (embeds) :11434  (LOCAL on the desktop)
+> ```
+>
+> - **Laptop (the brain):** set up via `llm-test/` — Docker Desktop + WSL2, then
+>   `./llm-test/run-mira-small.ps1 -Size 8b -ModelDir C:\models -LlamaDir C:\llama-cpp-turboquant -Image nvidia/cuda:12.8.0-devel-ubuntu22.04`.
+>   Serves an 8B dense Qwen3 fully on the GPU (~54 tok/s). Open TCP 8080 in the firewall.
+>   The turboquant binary is built for Blackwell (`-CudaArch 120`, CUDA 12.8).
+> - **Desktop (Mira):** `git pull` then `start_discord.bat`. It already points at the laptop
+>   (`BRAIN_IP=192.168.12.116`), keeps embeddings on the desktop's **own** `localhost:11434`
+>   (the Chroma store was built with `nomic-embed-text`, so Ollama stays required here), and
+>   runs Whisper `cuda + int8_float16 + small.en` (the 1660's fp16 path is broken).
+> - **IP is DHCP** — re-check `192.168.12.116` on the laptop each session and update
+>   `BRAIN_IP` if it moved (a router reservation keeps it fixed).
+>
+> The sections below describe the ORIGINAL layout (brain on the desktop, Mira on the
+> laptop). Keep them for reference, or if you flip back — swap the IPs accordingly.
+
+---
+
+## Original layout: brain on the desktop PC, Mira on the laptop
 
 Run the heavy LLM on the desktop (full CPU/RAM/GPU, nothing competing) and run Mira —
 mic/STT, voice/TTS, avatar — on the laptop (its 8 GB NVIDIA GPU handles Whisper fast,

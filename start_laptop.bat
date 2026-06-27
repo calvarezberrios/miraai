@@ -1,4 +1,10 @@
 @echo off
+REM ===== DEPRECATED (2026-06-27): topology REVERSED. =====
+REM The LAPTOP now runs the BRAIN (turbo LLM) via ./llm-test/run-mira-small.ps1, and MIRA
+REM runs on the DESKTOP via start_discord.bat. This script is the OLD path (Mira on the
+REM laptop, brain on the desktop) — kept only in case you flip back. If you do, set PC_IP
+REM to whichever machine is running the brain server.
+REM
 REM ===== Mira on the LAPTOP — brain runs on the desktop PC over the LAN =====
 REM EDIT PC_IP to your desktop's current LAN IP. run-turbo-server.ps1 on the PC prints it.
 set PC_IP=192.168.12.151
