@@ -62,6 +62,9 @@ foreach ($f in @($Model, $MMProj)) {
 
 docker rm -f llama-turbo 2>$null | Out-Null
 # Same as run-mira-small, plus --mmproj for the vision encoder. -ngl 99 = full GPU offload.
+# NOTE: KV cache is q8_0 here, NOT the turbo4/turbo3 quant run-mira-small uses. The aggressive
+# turbo cache shreds the dense image tokens -> the model returns degenerate captions ("the the the")
+# or empty strings. q8_0 keeps vision coherent and still halves the KV VRAM vs f16.
 docker run -d --name llama-turbo `
   --gpus all --ulimit memlock=-1 --cap-add=IPC_LOCK `
   -p ${Port}:8080 `
@@ -72,7 +75,7 @@ docker run -d --name llama-turbo `
     -m /models/$Model `
     --mmproj /models/$MMProj `
     --host 0.0.0.0 --port 8080 `
-    --cache-type-k turbo4 --cache-type-v turbo3 `
+    --cache-type-k q8_0 --cache-type-v q8_0 `
     -ngl 99 --jinja `
     -c $CtxSize | Out-Null
 
