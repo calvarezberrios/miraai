@@ -30,6 +30,11 @@ def load_env(path: str = _DEFAULT_PATH) -> None:
             key, val = line.split("=", 1)
             key, val = key.strip(), val.strip()
             if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-                val = val[1:-1]                      # strip matching surrounding quotes
+                val = val[1:-1]                      # quoted -> literal contents (keep any '#')
+            else:
+                hash_at = val.find(" #")             # unquoted -> drop an inline " # comment"
+                if hash_at != -1:
+                    val = val[:hash_at]
+                val = val.rstrip()
             if key:
                 os.environ.setdefault(key, val)      # don't clobber real env vars
