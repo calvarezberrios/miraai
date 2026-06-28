@@ -834,6 +834,29 @@ class DiscordAdapter(IOAdapter):
                 self._brain_busy.clear()
                 self._inbox.task_done()
 
+    # ---------------- input gating (used by the main loop / composite) ----------------
+    def pause_input(self) -> None:
+        """Mute the ears while she speaks. On Discord the bot doesn't receive its own VC
+        playback, so this is mainly to stop Whisper from running on incoming voice while the
+        GPU is busy with TTS — and so a turn driven by ANOTHER source (Twitch chat, an
+        autonomous daydream) also pauses voice processing, not just Discord's own turns."""
+        self._brain_busy.set()
+
+    def resume_input(self) -> None:
+        self._brain_busy.clear()
+
+    def flush_input(self) -> None:
+        # Drop any half-built voice timelines (e.g. after an interrupt).
+        with self._vbuf_lock:
+            self._vbuf.clear()
+
+    def set_voice_target(self) -> None:
+        """Force the next speak() to play into the connected voice channel, regardless of
+        which channel the last Discord turn targeted. The composite calls this so a reply
+        triggered by Twitch chat (or a spoken daydream) is heard in the VC — and therefore
+        on the stream — instead of being sent to a text channel."""
+        self._current_target = ("voice", None)
+
     # ---------------- mouth ----------------
     def speak(self, text: str) -> None:
         kind, target = self._current_target
@@ -903,7 +926,12 @@ class DiscordAdapter(IOAdapter):
             from pypdf import PdfReader
             reader = PdfReader(_io.BytesIO(data))
             pages = len(reader.pages)
-            text = "\n".join((p.extract_text() or "") for p in reader.pages)
+            # Keep the pages exactly as written, each labeled, so the full manual can be handed
+            # to her verbatim (and she can cite a page) instead of a few embed-matched excerpts.
+            text = "\n\n".join(
+                f"[Page {i}]\n{(p.extract_text() or '').strip()}"
+                for i, p in enumerate(reader.pages, 1)
+            )
         except Exception as e:
             self._post(channel, f"⚠️ couldn't read `{filename}`: {e}")
             return
@@ -920,8 +948,9 @@ class DiscordAdapter(IOAdapter):
             self._post(channel, f"⚠️ couldn't store **{name}**: {e}")
             return
         if n:
-            self._post(channel, f"✅ Read **{name}** — {pages} pages, {words:,} words, {n} chunks "
-                                f"stored. Ask me anything about it. (`mira forget {name}` to remove.)")
+            self._post(channel, f"✅ Read **{name}** — {pages} pages, {words:,} words stored in full "
+                                f"(pages kept as written). I'll have the whole manual when we talk "
+                                f"about it. (`mira forget {name}` to remove.)")
         else:
             self._post(channel, f"⚠️ Couldn't store **{name}** — is the embedding server reachable?")
 

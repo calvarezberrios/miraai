@@ -98,6 +98,9 @@ _last_wander = 0.0                     # last time her mind wandered at all
 _last_wander_spoke = 0.0               # last time a wandering thought was voiced
 
 # Listening / drafting state
+_hosting = True                        # when False she goes addressed-only: no spoken musings and
+                                       # no autonomous chime-ins (drafting/faster replies stay on).
+                                       # Toggled live from main.py so the streamer can take the mic.
 _someone_speaking = False              # True between the first partial and the final
 _last_partial = ""                     # newest live transcript of what's being said
 _draft_speaker: Optional[str] = None   # display name of who's currently speaking (for identity)
@@ -143,6 +146,18 @@ def stop() -> None:
     for t in (_thread, _drafter):
         if t is not None:
             t.join(timeout=2.0)
+
+
+def set_hosting(enabled: bool) -> None:
+    """Turn her autonomous talking (spoken mind-wandering + overheard chime-ins) on or off
+    without stopping the drafter — so addressed replies stay fast. Drafting and answering when
+    addressed are unaffected; this only governs whether she speaks UNPROMPTED."""
+    global _hosting
+    _hosting = bool(enabled)
+
+
+def hosting_enabled() -> bool:
+    return _hosting
 
 
 def touch(now: Optional[float] = None) -> None:
@@ -406,6 +421,8 @@ def _tick() -> None:
 
 
 def _deliberate_reply() -> None:
+    if not _hosting:
+        return   # addressed-only: don't chime in on overheard talk
     if not thalamus.awaiting_reply():
         return   # the foreground already answered it (or she replied) in the meantime
     history, _seq = thalamus.snapshot()
@@ -460,7 +477,8 @@ def _wander_tick() -> None:
     # has spoken for a while (she keeps the thought private then). The thought above is
     # already saved to her subconscious_log regardless of whether she voices it.
     human_active = (_last_input > 0) and (now - _last_input <= WANDER_SHARE_SILENCE_SEC)
-    if (human_active
+    if (_hosting
+            and human_active
             and now - _last_wander_spoke >= WANDER_SPEAK_COOLDOWN_SEC
             and random.random() < WANDER_SPEAK_CHANCE
             and not _someone_speaking
@@ -495,11 +513,30 @@ def _norm(s: str) -> str:
     return " ".join((s or "").lower().split()).strip(" .!?,")
 
 
+_situation_extra: Optional[Callable[[], str]] = None   # set by main.py: returns ambient context
+                                                       # (e.g. live stream status / on-screen game)
+
+
+def set_situation_extra(fn: Optional[Callable[[], str]]) -> None:
+    """Register a source of AMBIENT context appended to autonomous-moment situations — e.g.
+    the live stream status or what's currently on screen — so her musings are grounded in
+    what's happening on the broadcast, not just the clock."""
+    global _situation_extra
+    _situation_extra = fn
+
+
 def _situation(listening: bool = False) -> str:
     """A light 'when' note for autonomous moments (the foreground builds a richer
     one for addressed turns from the actual event)."""
     dt = datetime.datetime.now()
     when = "Right now it is " + dt.strftime("%A, %B %d, %Y, at %I:%M %p").lstrip("0") + "."
+    extra = ""
+    if _situation_extra is not None:
+        try:
+            extra = (_situation_extra() or "").strip()
+        except Exception:
+            extra = ""
+    extra = (" " + extra) if extra else ""
     if listening:
-        return when + " Someone is speaking to you right now; this is what they've said so far."
-    return when + " No one is speaking to you directly at this moment."
+        return when + extra + " Someone is speaking to you right now; this is what they've said so far."
+    return when + extra + " No one is speaking to you directly at this moment."

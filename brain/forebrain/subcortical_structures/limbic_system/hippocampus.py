@@ -14,6 +14,7 @@ Two flavors of memory formation:
 """
 
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -229,15 +230,40 @@ def last_session():
     return newest[0]
 
 
-# --- reference documents (e.g. a game rulebook PDF) — chunked + RAG-retrieved ----------
-# She can't fit a whole rulebook in the local model's ~8k context, so we chunk it, embed each
-# chunk, and pull only the relevant pieces into context when a message is actually about it.
+# --- reference documents (e.g. a game rulebook PDF) — full text, RAG-detected ----------
+# We embed the document in chunks ONLY to detect which document a turn is about. Once detected,
+# the ENTIRE document text (pages exactly as written) is injected, so she never misses a detail
+# that happened to fall outside the few chunks an embedding query would have matched. The full
+# verbatim text is kept on disk beside the Chroma store; the chunks are just the relevance index.
 
 _DOC_CHUNK_WORDS = int(os.environ.get("MIRA_DOC_CHUNK_WORDS", "280"))   # ~chunk size in words
 _DOC_CHUNK_OVERLAP = int(os.environ.get("MIRA_DOC_OVERLAP", "40"))      # words shared between chunks
 # Documents are reference material, not chit-chat, so a slightly more permissive recall bar than
 # episodic memory's 0.85 — a paraphrased question ("how do I attack") should still pull the rule.
 _DOC_RECALL_MAX_DISTANCE = float(os.environ.get("MIRA_DOC_RECALL_MAX_DISTANCE", "1.05"))
+
+# Full document text lives here (one file per document), so the WHOLE manual can be injected.
+_DOCS_DIR = os.path.join("memory_store", "documents")
+os.makedirs(_DOCS_DIR, exist_ok=True)
+# Safety cap (words) on how much document text to inject in a single turn, so a giant manual
+# can't overflow the model's context window. A typical game manual fits well under this; raise
+# it (and the server's -c) if you load very large documents. Tune with MIRA_DOC_INJECT_MAX_WORDS.
+_DOC_INJECT_MAX_WORDS = int(os.environ.get("MIRA_DOC_INJECT_MAX_WORDS", "12000"))
+
+
+def _doc_path(name):
+    """On-disk path for a document's full verbatim text (slugified, .txt)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "document").lower()).strip("-") or "document"
+    return os.path.join(_DOCS_DIR, slug + ".txt")
+
+
+def get_document_text(name):
+    """The full verbatim text of a stored document ('' if not found)."""
+    try:
+        with open(_doc_path(name), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
 
 
 def _chunk_text(text, size=None, overlap=None):
@@ -252,10 +278,18 @@ def _chunk_text(text, size=None, overlap=None):
 
 
 def remember_document(name, text):
-    """Store a reference document under `name` (chunked + embedded). Replaces any existing doc
-    with the same name. Returns the number of chunks stored (0 if nothing usable / embed down)."""
+    """Store a reference document under `name`: the FULL verbatim text on disk (for whole-document
+    injection) plus chunk embeddings (used only to detect when a turn is about this document).
+    Replaces any existing doc with the same name. Returns the number of chunks indexed (0 if
+    nothing usable / embed down)."""
     name = (name or "document").strip()
     forget_document(name)                      # replace, don't duplicate, on re-upload
+    # Keep the entire document exactly as written, so she gets the whole manual — not excerpts.
+    try:
+        with open(_doc_path(name), "w", encoding="utf-8") as f:
+            f.write(text or "")
+    except OSError as e:
+        print(f"[hippocampus] couldn't save full document text: {e}")
     chunks = _chunk_text(text)
     if not chunks:
         return 0
@@ -297,6 +331,47 @@ def recall_document(query, n=3, max_distance=None):
     return out
 
 
+def recall_full_documents(query, max_words=None):
+    """Detect which document(s) a turn is about (via the chunk embeddings) and return the ENTIRE
+    text of each — pages exactly as written — not just the matching chunks. Best-matching document
+    first; total injected text is capped at max_words (default _DOC_INJECT_MAX_WORDS) so a huge
+    manual can't overflow the context. Returns [{"name", "text"}]; empty if nothing's relevant."""
+    if _docs.count() == 0:
+        return []
+    try:
+        q = _embed(query)
+    except Exception as e:
+        print(f"[hippocampus] embed unavailable — no document recall: {e}")
+        return []
+    res = _docs.query(query_embeddings=[q], n_results=min(8, _docs.count()),
+                      include=["metadatas", "distances"])
+    metas, dists = res["metadatas"][0], res["distances"][0]
+    # ordered, de-duplicated list of relevant document names (closest match first)
+    names = []
+    for m, dist in zip(metas, dists):
+        if dist <= _DOC_RECALL_MAX_DISTANCE:
+            nm = (m or {}).get("name", "document")
+            if nm not in names:
+                names.append(nm)
+    if not names:
+        return []
+    budget = _DOC_INJECT_MAX_WORDS if max_words is None else max_words
+    out, used = [], 0
+    for nm in names:
+        full = get_document_text(nm).strip()
+        if not full:
+            continue
+        wc = len(full.split())
+        if used + wc > budget:                 # too big to fit whole — include what's left of the budget
+            approx_chars = max(0, budget - used) * 6   # ~6 chars/word; preserves page formatting
+            full = full[:approx_chars].rstrip() + "\n\n[…document truncated to fit the context window…]"
+            out.append({"name": nm, "text": full})
+            break
+        out.append({"name": nm, "text": full})
+        used += wc
+    return out
+
+
 def list_documents():
     """Names of the documents she currently has loaded (with chunk counts)."""
     got = _docs.get(include=["metadatas"])
@@ -311,6 +386,10 @@ def forget_document(name):
     name = (name or "").strip()
     if not name:
         return False
+    try:                                       # remove the full-text file too
+        os.remove(_doc_path(name))
+    except OSError:
+        pass
     existing = _docs.get(where={"name": name})
     ids = existing.get("ids") or []
     if not ids:

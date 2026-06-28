@@ -203,12 +203,13 @@ def _build_system(mood_flavor: str = "", memories=None, situation: str = "",
             "them, and always speak about yourself in the first person):\n" + recalled
         )
     if documents:
-        refs = "\n".join(f"- {d}" for d in documents)
+        refs = "\n\n".join(documents)
         system_content += (
-            "\n\nReference material you've been given (e.g. a game rulebook). UNLIKE your loose "
-            "memories above, use these passages PRECISELY: quote or apply the rules and values "
-            "exactly as written, and don't invent rules that aren't here. If something isn't "
-            "covered, say so instead of making it up. Relevant excerpts:\n" + refs
+            "\n\nReference material you've been given (e.g. a game rulebook), reproduced in FULL "
+            "with its original page labels. UNLIKE your loose memories above, use this PRECISELY: "
+            "apply the rules and values exactly as written, quote the wording when it matters, and "
+            "cite the page if asked. Do not invent rules that aren't here; if something genuinely "
+            "isn't covered, say so instead of guessing. Document:\n" + refs
         )
     return system_content
 

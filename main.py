@@ -35,7 +35,7 @@ from brain.forebrain.subcortical_structures.limbic_system.amygdala import feel, 
 import brain.forebrain.subcortical_structures.limbic_system.amygdala as amygdala
 from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
     recall, observe, consolidate, summarize_session, last_session,
-    recall_document, remember_document, list_documents, forget_document,
+    recall_document, recall_full_documents, remember_document, list_documents, forget_document,
 )
 from brain.forebrain.subcortical_structures.basal_ganglia.action_selector import (
     should_respond, mark_engaged,
@@ -68,6 +68,13 @@ parser.add_argument(
     help="Run connected to Discord instead of the local mic/speaker.",
 )
 parser.add_argument(
+    "--twitch",
+    action="store_true",
+    help="Read live Twitch chat (set TWITCH_CHANNEL) and respond by voice/avatar. The local "
+         "mic runs too so you can talk to her while chat scrolls. Reading chat is free "
+         "(anonymous, read-only); she only spends a model call when she actually speaks.",
+)
+parser.add_argument(
     "--subconscious",
     action="store_true",
     help="Enable the background subconscious: pre-drafting, autonomous chime-ins, and "
@@ -81,25 +88,119 @@ parser.add_argument(
          "(faster turns), WITHOUT the full subconscious's chime-ins or mind-wandering. "
          "Implied by --subconscious.",
 )
+parser.add_argument(
+    "--game-audio",
+    action="store_true",
+    help="Let her HEAR the desktop's output mix (game/stream audio) via WASAPI loopback and "
+         "transcribe spoken bits as ambient context tagged 'Game' — so she can talk about the "
+         "game. Use headphones so it doesn't bleed into your mic. Pairs with stream mode.",
+)
+parser.add_argument(
+    "--vision",
+    action="store_true",
+    help="Let her SEE the screen: grabs a frame every few seconds and captions it via a "
+         "Qwen2.5-VL model on the laptop (set MIRA_VISION_BASE_URL), surfaced as ambient "
+         "context so she can talk about the game on screen. Offloaded — ~no local VRAM.",
+)
+parser.add_argument(
+    "--host",
+    action="store_true",
+    help="VTuber HOST autonomy: turn on the subconscious AND make her noticeably more "
+         "talkative — she fills lulls and hosts actively instead of only answering when "
+         "addressed. Tuned for streaming; pair with --discord --twitch. Per-knob env vars "
+         "(MIRA_WANDER_*) still override these defaults.",
+)
 args = parser.parse_args()
 
 # Simplified pipeline by default: speech in -> Mira thinks (grounded in memories + this
 # session) -> speech out, with no background mind. Opt into the full subconscious with
 # --subconscious.
-USE_SUBCONSCIOUS = args.subconscious
+USE_SUBCONSCIOUS = args.subconscious or args.host
 # Pre-drafting (job 1 of the subconscious) — speak faster by having a reply ready the moment
 # you stop. The full subconscious includes this; --draft turns ON just the drafting, with no
 # chime-ins or daydreams.
 DRAFTING = USE_SUBCONSCIOUS or args.draft
 
-if args.discord:
+# Host mode: lean her mind-wandering toward ACTIVELY hosting — drift sooner, muse more often,
+# and don't go shy just because the room is briefly quiet. These set the subconscious's live
+# tunables directly; an explicit MIRA_WANDER_* env var (read at import) still wins, so power
+# users keep full control.
+if args.host:
+    import os as _os
+    # Cadence note: wandering ONLY fires in genuine dead air — any chat/voice activity resets
+    # the idle timer (touch()), so when chat is live she reacts to chat instead of musing. These
+    # values target a spoken musing roughly every ~35-50s during a real lull: attentive without
+    # monologuing over a quiet moment. Each generated thought is also a model call, so EVERY is
+    # kept modest to leave GPU headroom for chat reactions on the 6GB box.
+    if "MIRA_WANDER_AFTER" not in _os.environ:
+        subconscious.WANDER_AFTER_SEC = 20.0           # start drifting after a 20s lull
+    if "MIRA_WANDER_EVERY" not in _os.environ:
+        subconscious.WANDER_EVERY_SEC = 30.0           # generate a (private) thought every ~30s of quiet
+    if "MIRA_WANDER_SPEAK_CHANCE" not in _os.environ:
+        subconscious.WANDER_SPEAK_CHANCE = 0.75        # say most of what she thinks of
+    if "MIRA_WANDER_SPEAK_COOLDOWN" not in _os.environ:
+        subconscious.WANDER_SPEAK_COOLDOWN_SEC = 35.0  # but at most one spoken musing per ~35s
+    if "MIRA_WANDER_SHARE_SILENCE" not in _os.environ:
+        subconscious.WANDER_SHARE_SILENCE_SEC = 1800.0  # keep hosting through long quiet stretches
+
+if args.discord and args.twitch:
+    # Stream setup: talk to her in a Discord VC (her voice -> VC -> OBS -> stream) AND have
+    # her read Twitch chat. Both feed one brain; all her speech plays into the VC.
+    from peripheral_nervous_system.discord_adapter import DiscordAdapter
+    from peripheral_nervous_system.twitch_adapter import TwitchAdapter
+    from peripheral_nervous_system.composite_adapter import CompositeAdapter
+    _discord = DiscordAdapter()
+    _twitch = TwitchAdapter(chat_only=True)   # Discord owns the mic + all voice output
+    adapter = CompositeAdapter([_discord, _twitch], voice=_discord)
+    print("Mira is coming up in STREAM mode — Discord voice + Twitch chat, talking in the VC.\n")
+elif args.discord:
     from peripheral_nervous_system.discord_adapter import DiscordAdapter
     adapter = DiscordAdapter()
     print("Mira is coming up in Discord mode.\n")
+elif args.twitch:
+    from peripheral_nervous_system.twitch_adapter import TwitchAdapter
+    adapter = TwitchAdapter()
+    print("Mira is coming up in Twitch mode — reading chat, talking back by voice.\n")
 else:
     from peripheral_nervous_system.local_adapter import LocalAdapter
     adapter = LocalAdapter()
     print("Mira is starting up — warming the brain, voice, and ears. Please wait to talk...\n")
+
+# Stream status (live/offline, viewers, game) — only meaningful when reading Twitch.
+stream_status = None
+if args.twitch:
+    from peripheral_nervous_system.stream_status import StreamStatus
+    stream_status = StreamStatus()
+
+# Game audio (hears the desktop output mix) — opt-in.
+game_audio = None
+if args.game_audio:
+    from peripheral_nervous_system.game_audio import GameAudio
+    game_audio = GameAudio()
+
+
+# Stream vision (sees the screen via the laptop VL model) — opt-in.
+_stream_vision = None
+if args.vision:
+    from peripheral_nervous_system.stream_vision import StreamVision
+    _stream_vision = StreamVision()
+
+
+def _ambient_context():
+    """Everything she's passively AWARE of right now (broadcast state, what she can hear from
+    the game, what's on screen) folded into one note for her situation prompt. Each source
+    returns '' when it has nothing, so this stays empty until there's something real to say."""
+    bits = []
+    for src in (stream_status, game_audio, _stream_vision):
+        if src is not None:
+            try:
+                s = src.summary()
+                if s:
+                    bits.append(s)
+            except Exception:
+                pass
+    return " ".join(bits)
+
 
 message_count = 0
 last_consolidation = time.time()
@@ -124,6 +225,73 @@ def run_consolidation():
 
 _last_seen = {}   # chan_key -> timestamp of the previous inbound message
 _last_chime = {}  # chan_key -> timestamp of her last unaddressed chime-in (cooldown)
+
+# --- hosting toggle -----------------------------------------------------------
+# When ON she hosts: reacts to Twitch chat / un-addressed voice and (with the subconscious)
+# fills lulls. When OFF she's addressed-only — she answers when you talk to her in the VC or
+# when chat @'s/names her, but otherwise stays quiet so YOU can carry the stream. Starts ON;
+# toggle live with a spoken/typed command. (Only honored from you — Discord, not Twitch chat —
+# so a viewer can't mute her.)
+HOSTING_ENABLED = threading.Event()
+HOSTING_ENABLED.set()
+
+def _norm_cmd(text):
+    return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
+
+# Phrases that hand the floor to her (host more) or take it back (you talk more).
+_HOST_ON_PHRASES = (
+    "mira host", "mira start hosting", "mira take over", "mira you talk", "mira take the mic",
+    "mira keep it lively", "mira hosting on", "mira host mode on", "mira be chatty", "mira go ahead",
+)
+_HOST_OFF_PHRASES = (
+    "mira quiet", "mira be quiet", "mira let me talk", "mira stop hosting", "mira ill talk",
+    "mira i'll talk", "mira hosting off", "mira host mode off", "mira hush", "mira stand by",
+    "mira take a backseat", "mira chill",
+)
+
+
+def _maybe_toggle_hosting(event):
+    """Intercept a streamer command to turn hosting on/off. Honored only from Discord
+    (voice transcript or text) — never Twitch chat, so viewers can't flip it. Returns True
+    when it consumed the message."""
+    if getattr(event, "channel", "") == "twitch_chat":
+        return False
+    c = _norm_cmd(event.text)
+    if not c.startswith("mira"):
+        return False
+    want_on = any(c == p or c.startswith(p) for p in _HOST_ON_PHRASES)
+    want_off = any(c == p or c.startswith(p) for p in _HOST_OFF_PHRASES)
+    if not (want_on or want_off):
+        return False
+    if want_on:
+        HOSTING_ENABLED.set()
+        ack = "Okay, I've got it from here~ I'll keep things lively."
+    else:
+        HOSTING_ENABLED.clear()
+        ack = "Got it — I'll hang back and let you talk. Just say my name if you want me."
+    if USE_SUBCONSCIOUS:
+        subconscious.set_hosting(HOSTING_ENABLED.is_set())
+    print(f"\n[hosting {'ON' if HOSTING_ENABLED.is_set() else 'OFF'}]\n")
+    chan_key = getattr(event.raw, "id", None)
+    chan_key = str(chan_key) if chan_key is not None else event.channel
+    speak_reply(ack, channel=chan_key)   # spoken in the VC (heard on stream) / posted in text
+    return True
+
+
+def _on_stream_transition(kind, info):
+    """Stream just went live/offline (detected by the status poller). Note it, and — if she's
+    hosting and has a voice out — have her mark the moment out loud (heard in the VC -> stream)."""
+    print(f"\n[stream {kind.upper()}]" + (f" — {info.get('game') or ''}".rstrip()) + "\n")
+    if not HOSTING_ENABLED.is_set():
+        return
+    if kind == "live":
+        line = "Oh — we're live now! Hi everyone, welcome in~"
+    else:
+        line = "And that's the stream done. Thanks for hanging out, everyone."
+    try:
+        speak_reply(line, channel="discord_voice")   # composite routes spoken output to the VC
+    except Exception as e:
+        print(f"[stream transition speak failed: {e}]")
 
 
 def _too_thin_to_chime(text):
@@ -192,6 +360,10 @@ def describe_situation(event, prev_seen, now):
             "This is a public server channel where other people can see the "
             "conversation and may join in."
         )
+    # Ambient awareness: broadcast state, what she can hear from the game, what's on screen.
+    ambient = _ambient_context()
+    if ambient:
+        parts.append(ambient)
     return " ".join(parts)
 
 
@@ -416,7 +588,7 @@ def _recall_for(event):
     speaker_known = bool(ident_speaker) and any(
         ident_speaker.lower() in m.lower() for m in memories)
     # reference-document excerpts relevant to this message (rulebooks etc.), labeled by source
-    documents = [f"[{r['name']}] {r['text']}" for r in recall_document(event.text)]
+    documents = [f"[{r['name']}]\n{r['text']}" for r in recall_full_documents(event.text)]
     return memories, ident_speaker, speaker_known, documents
 
 
@@ -524,6 +696,11 @@ def handle_message(event, interrupting=False):
     if game_master.intercept(event, notify=adapter.notify, speak=speak_reply):
         return
 
+    # Streamer command: "mira host" / "mira let me talk" etc. — flip whether she hosts
+    # (talks unprompted) or stays addressed-only. Consumes the message when it matches.
+    if not interrupting and _maybe_toggle_hosting(event):
+        return
+
     # She follows the whole room: every message updates short-term context,
     # whether or not she ends up replying to it. (The subconscious reads this.)
     # Tag the turn with WHO said it so multi-speaker context stays attributable.
@@ -571,7 +748,8 @@ def handle_message(event, interrupting=False):
     # YES/NO relevance check confirms the message actually continues the thread (so she doesn't
     # grab unrelated chatter in a busy channel), then she answers it like an addressed turn.
     # (Voice has its own chime-in path below.)
-    if (not interrupting and not addressed and event.channel != "discord_voice"
+    if (not interrupting and not addressed
+            and event.channel not in ("discord_voice", "twitch_chat")
             and decision.reason == "consider"
             and prefrontal_cortex.judge_relevance(context)):
         addressed = True
@@ -611,11 +789,12 @@ def handle_message(event, interrupting=False):
 
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
-    elif event.channel == "discord_voice":
-        # In a voice channel she's an active participant, not a command bot: she wasn't
-        # named, so SHE decides whether to chime in on what was said — joining if it's
-        # relevant or about her, staying quiet otherwise. One call both decides and writes
-        # the line (returns "" to stay silent).
+    elif event.channel in ("discord_voice", "twitch_chat") and HOSTING_ENABLED.is_set():
+        # She's a participant, not a command bot: she wasn't named, so SHE decides whether to
+        # chime in on what was said — speaking if it's relevant or about her, staying quiet
+        # otherwise. One call both decides and writes the line (returns "" to stay silent).
+        # For Twitch this is a periodic digest of recent chat (the adapter already throttled
+        # the firehose to ~one of these per window), so a busy chat costs ~one model call here.
         #
         # Two cheap gates run first so she doesn't blurt at every utterance in a busy room:
         #   1. content gate — skip tiny STT fragments ("Okay.", "Well", "them.") outright.
@@ -829,8 +1008,9 @@ try:
     # Bring up the avatar (body). Non-fatal: if it can't start, the brain/voice
     # still run headless.
     try:
-        # Open a browser only for local desktop use; on a server (Discord mode)
-        # there's no display — capture the avatar by opening the exposed port.
+        # Open a browser only for local desktop use; in Discord/stream mode there's no need —
+        # OBS loads the avatar as a Browser Source via the exposed port once the terminal says
+        # the avatar is ready, so stay headless whenever Discord is in the mix.
         motor_cortex.start(open_browser=not args.discord)
         brocas_area.set_lip_callback(cerebellum.lip)   # TTS speech energy -> mouth
         brocas_area.set_subtitle_callback(motor_cortex.subtitle)  # spoken line -> word-by-word caption
@@ -846,11 +1026,27 @@ try:
     # Everything's hot — NOW open the ears (the model is already loaded, so the mic opens at once).
     adapter.start(on_event)
 
+    # Ground her musings in everything she's passively aware of (stream state, game audio, screen).
+    subconscious.set_situation_extra(_ambient_context)
+    # Make her aware of the broadcast itself (live/offline, viewers, game) — free, no GPU.
+    if stream_status is not None:
+        stream_status.start(on_transition=_on_stream_transition)
+    # Open the game-audio loopback ear (opt-in).
+    if game_audio is not None:
+        game_audio.start()
+    # Open her eyes on the screen (opt-in; offloaded to the laptop VL).
+    if _stream_vision is not None:
+        _stream_vision.start()
+
     # Bring her subconscious online (only with --subconscious): it listens to everything
     # she overhears, decides when to chime in, and lets her mind wander when it's quiet.
     if USE_SUBCONSCIOUS:
         subconscious.start(speak=speak_reply, session_recap=previous_session)
-        print("[subconscious: ON — drafting, chime-ins, mind-wandering]\n")
+        subconscious.set_hosting(HOSTING_ENABLED.is_set())   # sync the live hosting toggle
+        host_note = " [HOST mode — actively filling lulls]" if args.host else ""
+        print(f"[subconscious: ON — drafting, chime-ins, mind-wandering]{host_note}\n")
+        print("[hosting: ON — say \"mira let me talk\" to hand the floor back, "
+              "\"mira host\" to give it to her]\n")
     elif DRAFTING:
         subconscious.start(speak=speak_reply, session_recap=previous_session, draft_only=True)
         print("[drafting: ON — she drafts a reply while you talk, answers the instant you stop; "
@@ -872,6 +1068,12 @@ try:
             game_master.finalize_if_active(notify=adapter.notify)  # save an in-progress Deep IQ game
             if DRAFTING:
                 subconscious.stop()                   # quiet her mind / stop the drafter first
+            if stream_status is not None:
+                stream_status.stop()
+            if game_audio is not None:
+                game_audio.stop()
+            if _stream_vision is not None:
+                _stream_vision.stop()
             adapter.stop()
             run_consolidation()                       # flush atomic facts
             try:

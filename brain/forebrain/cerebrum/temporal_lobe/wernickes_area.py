@@ -68,6 +68,10 @@ _vad_options = VadOptions(min_silence_duration_ms=500)
 
 # ---------------- state ----------------
 _model = None
+_model_lock = threading.Lock()   # serialize transcribe() across callers (mic loop, Discord voice,
+                                 # game-audio): faster-whisper's model isn't safe for concurrent
+                                 # decodes. Mic stays low-latency because each call is short and the
+                                 # background game-audio caller runs on a slow cadence.
 _audio_q = queue.Queue()
 _listening = threading.Event()   # cleared = mic muted (Mira talking)
 _flush = threading.Event()
@@ -92,14 +96,25 @@ def _mic_callback(indata, frames, time_info, status):
 
 
 def _transcribe(buf):
-    segments, _ = _model.transcribe(
-        buf,
-        language=LANGUAGE,
-        beam_size=1,
-        condition_on_previous_text=False,
-        vad_filter=True,
-    )
-    return " ".join(s.text.strip() for s in segments).strip()
+    with _model_lock:
+        segments, _ = _model.transcribe(
+            buf,
+            language=LANGUAGE,
+            beam_size=1,
+            condition_on_previous_text=False,
+            vad_filter=True,
+        )
+        return " ".join(s.text.strip() for s in segments).strip()
+
+
+def speech_present(audio) -> bool:
+    """Cheap VAD gate: True if the buffer (16 kHz mono float32) contains any speech. Used by the
+    game-audio capturer to skip transcribing music/ambient — only actual spoken lines cost a decode."""
+    try:
+        a = np.asarray(audio, dtype=np.float32)
+        return bool(len(a) and get_speech_timestamps(a, _vad_options))
+    except Exception:
+        return False
 
 
 def transcribe(audio):
