@@ -8,6 +8,7 @@ check here means the live run will work too.
     python tools/check_capture.py twitch       # just the Twitch status (Helix) auth
     python tools/check_capture.py audio vision # any subset
     python tools/check_capture.py devices      # list audio devices (to pick game-audio capture)
+    python tools/check_capture.py monitors     # list monitors (to pick which screen vision watches)
 
 Checks:
     twitch  - Helix app-token auth + your stream's live/offline + viewers + game
@@ -143,6 +144,27 @@ def list_devices() -> bool:
     return True
 
 
+def list_monitors() -> bool:
+    _hdr("monitors (vision capture)")
+    try:
+        import mss
+    except Exception as e:
+        print(f"{NO} mss missing: {e}  (python -m pip install mss pillow)")
+        return False
+    with mss.mss() as sct:
+        for i, m in enumerate(sct.monitors):
+            if i == 0:
+                kind = "ALL screens stitched together — do NOT use for vision"
+            elif m.get("left", 0) == 0 and m.get("top", 0) == 0:
+                kind = "PRIMARY / main (vision auto-picks this)"
+            else:
+                kind = "secondary"
+            print(f"  #{i}  {m['width']}x{m['height']:<5} at ({m['left']},{m['top']})   {kind}")
+    print("\n  Vision auto-uses the primary monitor. To force a specific one (by resolution),")
+    print("  set MIRA_VISION_MONITOR=<#> in .env (use a 1+ index, never 0).")
+    return True
+
+
 def check_audio() -> bool:
     _hdr("game audio capture")
     try:
@@ -222,8 +244,8 @@ def check_vision() -> bool:
 
 # ---------------------------------------------------------------------------
 CHECKS = {"twitch": check_twitch, "chat": check_chat, "audio": check_audio, "vision": check_vision}
-# 'devices' is a helper listing, not a pass/fail check — excluded from the default run.
-HELPERS = {"devices": list_devices}
+# Helper listings (not pass/fail checks) — excluded from the default run.
+HELPERS = {"devices": list_devices, "monitors": list_monitors}
 
 
 def main(argv) -> int:
