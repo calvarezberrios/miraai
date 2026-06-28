@@ -447,44 +447,59 @@ def _wander_tick() -> None:
     now = time.time()
     history, _seq = thalamus.snapshot()
 
-    # Reminisce about a real memory, or wonder about the unexperienced. Lean toward
-    # curiosity unless there's something concrete to reminisce on.
+    # HOST MODE: she's not daydreaming, she's RUNNING THE SHOW. Instead of an abstract private
+    # musing, she takes the floor like a real streamer — a line grounded in what's actually
+    # happening (the game on screen, chat, the moment) and voiced reliably to fill the air, not
+    # on a rare random chance. Gate FIRST so we don't burn a model call on a line she can't say.
+    if _hosting:
+        human_active = (_last_input > 0) and (now - _last_input <= WANDER_SHARE_SILENCE_SEC)
+        if not (human_active
+                and now - _last_wander_spoke >= WANDER_SPEAK_COOLDOWN_SEC
+                and not _someone_speaking
+                and not thalamus.awaiting_reply()):
+            return
+        seed = _last_user_text(history)
+        memories = recall(seed) if seed else []
+        if _session_recap:
+            memories = [f"From our last session: {_session_recap}"] + memories
+        line = prefrontal_cortex.host_patter(
+            situation=_situation(),
+            mood_flavor=amygdala.color(),
+            memories=memories,
+            history=history,                      # recent stream context so the line lands
+            recent_thoughts=subconscious_log.recent(THOUGHTS_SURFACED),
+        )
+        _last_wander = now
+        if not line:
+            return
+        _last_wander_spoke = now
+        subconscious_log.record(line, mode="host")
+        if LOG_THOUGHTS:
+            print(f"[mira hosts] {line}")
+        _emit(line, user_text=None, source="host")   # source != daydream -> it enters the chat log
+        return
+
+    # NOT HOSTING: a private introspective daydream. Logged so it can quietly color later
+    # replies, but never spoken (she's addressed-only when not hosting).
     seed = _last_user_text(history) or "GameRaiderX and the things we've talked about"
     memories = recall(seed)
     if _session_recap:
         memories = [f"From our last session: {_session_recap}"] + memories
     mode = "memory" if (memories and random.random() < 0.5) else "curiosity"
-
     thought = prefrontal_cortex.wander(
         mode=mode,
         mood_flavor=amygdala.color(),
         situation=_situation(),
         memories=memories if mode == "memory" else None,
         recent_thoughts=subconscious_log.recent(THOUGHTS_SURFACED),
-        history=history,                      # current session chat log (drift off it)
+        history=history,
     )
     _last_wander = now
     if not thought:
         return
-
-    # Thoughts live in her private log, never the chat log.
-    subconscious_log.record(thought, mode=mode)
+    subconscious_log.record(thought, mode=mode)        # private log, never the chat log
     if LOG_THOUGHTS:
         print(f"[mira's mind wanders] {thought}")
-
-    # Once in a while a thought escapes out loud — but rarely, never while someone's
-    # talking, never on top of an unanswered message, and NEVER to a room where no human
-    # has spoken for a while (she keeps the thought private then). The thought above is
-    # already saved to her subconscious_log regardless of whether she voices it.
-    human_active = (_last_input > 0) and (now - _last_input <= WANDER_SHARE_SILENCE_SEC)
-    if (_hosting
-            and human_active
-            and now - _last_wander_spoke >= WANDER_SPEAK_COOLDOWN_SEC
-            and random.random() < WANDER_SPEAK_CHANCE
-            and not _someone_speaking
-            and not thalamus.awaiting_reply()):
-        _last_wander_spoke = now
-        _emit(thought, user_text=None, source="daydream")
 
 
 # ---------------------------------------------------------------------------

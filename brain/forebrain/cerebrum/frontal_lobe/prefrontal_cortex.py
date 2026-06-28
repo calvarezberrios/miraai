@@ -583,6 +583,51 @@ _WANDER_MODES = {
     ),
 }
 
+def host_patter(situation: str = "", mood_flavor: str = "", memories=None, history=None,
+                recent_thoughts=None, speaker: str = None, speaker_known: bool = False,
+                documents=None) -> str:
+    """One line the HOST says out loud to fill a quiet beat on a live stream.
+
+    Unlike wander() (an abstract private daydream), this is real streamer patter: grounded in
+    what's actually happening RIGHT NOW (the game on screen, chat, the moment, a memory) and
+    spoken in her own voice via the full PERSONA. She LEADS — picks the subject, gives a take,
+    reacts — and never asks the audience what to do or ends on a question. Returns "" on failure.
+    """
+    system_content = _build_system(mood_flavor, memories, situation, None,
+                                   speaker=speaker, speaker_known=speaker_known,
+                                   documents=documents)
+    system_content += (
+        "\n\nRIGHT NOW there is a quiet beat on your live stream and you are the HOST keeping the "
+        "energy up — this is not a reply to anyone, it's you taking the floor. Say ONE natural "
+        "thing out loud to your audience: react to what's on screen or in the game, drop an "
+        "opinion or a hot take, point something out, tease chat, or riff on the moment. Make it "
+        "SPECIFIC to what is actually happening in the situation above — never a generic line and "
+        "never 'I wonder...'. You are your own person leading the show, like a real solo streamer "
+        "filling the air. Do NOT ask what to do or what anyone wants, do NOT end on a question, "
+        "and do NOT narrate that you're filling time. Just say the one line."
+    )
+    if recent_thoughts:
+        system_content += (
+            "\n\nYou JUST said these recently — say something NEW, do not repeat them:\n"
+            + "\n".join(f"- {t}" for t in recent_thoughts)
+        )
+    messages = [{"role": "system", "content": system_content}]
+    if history:
+        messages += list(history)[-6:]      # recent context so the patter lands in the moment
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            max_tokens=120,
+            temperature=0.85,
+            **_PENALTIES,
+            extra_body=_EXTRA,
+        )
+        return _sanitize(response.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
 # Framing that keeps a wandering thought as INNER MONOLOGUE - not a greeting, not a
 # line of dialogue, not a reply. With no user turn, small instruct models (especially
 # ones fine-tuned on chit-chat) default to answering with "Hey! How are you?"; the

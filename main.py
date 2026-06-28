@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import io
+import os
 import re
 import shutil
 import sys
@@ -238,6 +239,13 @@ HOSTING_ENABLED.set()
 def _norm_cmd(text):
     return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
 
+
+def _is_streamer_channel(event):
+    """Commands are only honored from YOU — Discord voice/text or local — never from Twitch chat
+    or the game audio, so a viewer or a game character can't flip your toggles."""
+    ch = str(getattr(event, "channel", "") or "")
+    return ch.startswith("discord") or ch == "local"
+
 # Phrases that hand the floor to her (host more) or take it back (you talk more).
 _HOST_ON_PHRASES = (
     "mira host", "mira start hosting", "mira take over", "mira you talk", "mira take the mic",
@@ -249,12 +257,24 @@ _HOST_OFF_PHRASES = (
     "mira take a backseat", "mira chill",
 )
 
+# --- game conversation mode ---------------------------------------------------
+# A Discord-text/voice toggle flips her between hosting the stream and CONVERSING with a game's
+# AI character: she hears it via game audio and replies, and you relay her voice into the game's
+# mic with push-to-talk. Entering game mode pauses hosting so chat/musings don't interrupt; on
+# leaving she stays quiet until you say "mira host" again.
+GAME_MODE = threading.Event()
+GAME_CHARACTER = os.environ.get("MIRA_GAME_CHARACTER", "").strip() or "the game's character"
+_GAME_ON_PHRASES = ("mira play the game", "mira talk to the game", "mira game mode",
+                    "mira start the game", "mira lets play", "mira enter game", "mira play game")
+_GAME_OFF_PHRASES = ("mira stop playing", "mira stop the game", "mira exit game", "mira out of game",
+                     "mira leave the game", "mira end game", "mira done playing", "mira quit game")
+
 
 def _maybe_toggle_hosting(event):
     """Intercept a streamer command to turn hosting on/off. Honored only from Discord
     (voice transcript or text) — never Twitch chat, so viewers can't flip it. Returns True
     when it consumed the message."""
-    if getattr(event, "channel", "") == "twitch_chat":
+    if not _is_streamer_channel(event):
         return False
     c = _norm_cmd(event.text)
     if not c.startswith("mira"):
@@ -275,6 +295,58 @@ def _maybe_toggle_hosting(event):
     chan_key = getattr(event.raw, "id", None)
     chan_key = str(chan_key) if chan_key is not None else event.channel
     speak_reply(ack, channel=chan_key)   # spoken in the VC (heard on stream) / posted in text
+    return True
+
+
+def _emit_game_turn(text):
+    """A finalized game-character utterance -> a turn Mira replies to. Printed so you SEE what she
+    heard. Routed through the adapter's gate (composite.inject) so it serializes with other turns
+    and her reply is spoken into the VC (which you relay to the game's mic)."""
+    if not text:
+        return
+    print(f"\n{GAME_CHARACTER}: {text}")
+    ev = InputEvent(text=text, speaker=GAME_CHARACTER, channel="game_audio", mentioned=True)
+    inject = getattr(adapter, "inject", None)
+    (inject if callable(inject) else on_event)(ev)
+
+
+def _maybe_toggle_game_mode(event):
+    """Toggle game-conversation mode on/off (streamer-only, like the hosting toggle). You can name
+    who she's talking to: 'mira talk to stella'. Entering pauses hosting; leaving stays quiet."""
+    global GAME_CHARACTER
+    if game_audio is None or not _is_streamer_channel(event):
+        return False
+    c = _norm_cmd(event.text)
+    if not c.startswith("mira"):
+        return False
+    name, want_on = None, False
+    if c.startswith("mira talk to "):
+        who = c[len("mira talk to "):].strip()
+        if who and who not in ("the game", "the character", "her", "him", "it", "them"):
+            name = who.title()
+        want_on = True
+    elif any(c == p or c.startswith(p) for p in _GAME_ON_PHRASES):
+        want_on = True
+    want_off = any(c == p or c.startswith(p) for p in _GAME_OFF_PHRASES)
+    if not (want_on or want_off):
+        return False
+    chan_key = getattr(event.raw, "id", None)
+    chan_key = str(chan_key) if chan_key is not None else event.channel
+    if want_off:
+        GAME_MODE.clear()
+        game_audio.set_mode("ambient")
+        ack = "Okay, stepping out of the game. Say \"mira host\" when you want me back on stream."
+    else:
+        if name:
+            GAME_CHARACTER = name
+        GAME_MODE.set()
+        HOSTING_ENABLED.clear()                  # focus on the game: no chat chime-ins / musings
+        if USE_SUBCONSCIOUS:
+            subconscious.set_hosting(False)
+        game_audio.set_mode("converse", character=GAME_CHARACTER, on_utterance=_emit_game_turn)
+        ack = f"Okay — I'm listening to {GAME_CHARACTER} now. Let's talk to her."
+    print(f"\n[game mode {'ON' if GAME_MODE.is_set() else 'OFF'}]\n")
+    speak_reply(ack, channel=chan_key)
     return True
 
 
@@ -355,6 +427,13 @@ def describe_situation(event, prev_seen, now):
                 "general topic for the group or it clearly involves you; otherwise stay out "
                 "of their side conversation."
             )
+    elif event.channel == "game_audio":
+        parts.append(
+            f"You are playing a video game and talking WITH {GAME_CHARACTER}, an AI character in it. "
+            f"What follows is what {GAME_CHARACTER} just said OUT LOUD to you. You are the person "
+            f"she's speaking to — reply naturally, like a real back-and-forth conversation: answer "
+            f"her, react, ask her things. Keep it spoken and in the moment, not a description."
+        )
     elif str(event.channel).startswith("discord"):
         parts.append(
             "This is a public server channel where other people can see the "
@@ -364,6 +443,19 @@ def describe_situation(event, prev_seen, now):
     ambient = _ambient_context()
     if ambient:
         parts.append(ambient)
+    # HOST autonomy: while she's hosting a live stream, she's the entertainer and her own
+    # person — she LEADS, she doesn't defer. (Only when hosting + on a stream channel; with
+    # hosting off, or in a DM/game convo, she stays responsive/normal.)
+    if HOSTING_ENABLED.is_set() and event.channel in ("discord_voice", "twitch_chat"):
+        parts.append(
+            "You are the HOST of this live stream and its main entertainer — you are your own "
+            "person with your own opinions, not an assistant and not a sidekick. LEAD: decide "
+            "what to talk about, share your own takes, tell little stories, react to the game and "
+            "to chat, and keep the energy up on your own. Do NOT ask the streamer what they want "
+            "to do, what you should talk about, or what's next, and do NOT end your turns with a "
+            "question back to them. Carry the moment yourself the way a real solo streamer fills "
+            "the air — make a statement and run with it."
+        )
     return " ".join(parts)
 
 
@@ -696,8 +788,10 @@ def handle_message(event, interrupting=False):
     if game_master.intercept(event, notify=adapter.notify, speak=speak_reply):
         return
 
-    # Streamer command: "mira host" / "mira let me talk" etc. — flip whether she hosts
-    # (talks unprompted) or stays addressed-only. Consumes the message when it matches.
+    # Streamer commands (consume the message when matched): switch her into/out of conversing
+    # with a game's AI character, or flip whether she hosts vs stays addressed-only.
+    if not interrupting and _maybe_toggle_game_mode(event):
+        return
     if not interrupting and _maybe_toggle_hosting(event):
         return
 

@@ -38,6 +38,12 @@ WINDOW_SEC = float(os.environ.get("MIRA_GAME_AUDIO_WINDOW", "5"))
 KEEP_SEC = 45.0            # how long a heard line stays in the ambient summary before aging out
 MAX_LINES = 4             # cap the summary so the prompt stays small
 
+# --- converse mode (she talks WITH a game character instead of just overhearing) ---
+CONV_TICK_SEC = 0.25                                              # endpointing cadence
+CONV_END_SILENCE = float(os.environ.get("MIRA_GAME_END_SILENCE", "1.0"))   # trailing quiet -> utterance done
+CONV_MIN_SPOKEN = float(os.environ.get("MIRA_GAME_MIN_SPOKEN", "0.4"))     # ignore blips shorter than this
+CONV_MAX_SEC = float(os.environ.get("MIRA_GAME_MAX_SEC", "30"))            # force-finalize a long monologue
+
 
 def _read_env_file(path, key):
     if not os.path.exists(path):
@@ -71,6 +77,12 @@ class GameAudio:
         self._lines = deque()                    # (timestamp, text) recently heard
         self._last_text = ""
         self._worker: Optional[threading.Thread] = None
+        # converse mode
+        self._mode = "ambient"                   # "ambient" (overhear) | "converse" (reply to it)
+        self._on_utterance = None                # callback(text) for each finalized utterance
+        self._character = "the game character"   # who she thinks she's talking to
+        self._cbuf = None                        # continuous 16k buffer (converse endpointing)
+        self._last_conv = ""
 
     # ---------------- lifecycle ----------------
     def start(self) -> bool:
@@ -180,6 +192,16 @@ class GameAudio:
         with self._lock:
             self._pending.append(np.asarray(a, dtype=np.float32).copy())
 
+    def _resample_16k(self, win):
+        """Resample a device-rate mono float32 buffer to 16 kHz (linear)."""
+        np = self._np
+        if self._dev_sr == TARGET_SR:
+            return win.astype(np.float32)
+        n = max(1, int(len(win) * TARGET_SR / self._dev_sr))
+        x = np.linspace(0, 1, num=len(win), endpoint=False, dtype=np.float32)
+        xi = np.linspace(0, 1, num=n, endpoint=False, dtype=np.float32)
+        return np.interp(xi, x, win).astype(np.float32)
+
     def _drain_window(self):
         """Concatenate pending audio, keep only the last WINDOW_SEC, resample to 16 kHz mono."""
         np = self._np
@@ -190,35 +212,97 @@ class GameAudio:
             keep = int(self._dev_sr * WINDOW_SEC)
             self._pending = [buf[-keep:]] if len(buf) > keep else [buf]
             win = self._pending[0]
-        if self._dev_sr == TARGET_SR:
-            return win.astype(np.float32)
-        n = max(1, int(len(win) * TARGET_SR / self._dev_sr))   # linear resample to 16k
-        x = np.linspace(0, 1, num=len(win), endpoint=False, dtype=np.float32)
-        xi = np.linspace(0, 1, num=n, endpoint=False, dtype=np.float32)
-        return np.interp(xi, x, win).astype(np.float32)
+        return self._resample_16k(win)
+
+    def _drain_all(self):
+        """Drain ALL pending audio (since the last drain), resampled to 16 kHz — for the
+        continuous converse buffer, which must not drop any of the character's speech."""
+        np = self._np
+        with self._lock:
+            if not self._pending:
+                return None
+            buf = np.concatenate(self._pending)
+            self._pending = []
+        return self._resample_16k(buf)
+
+    def set_mode(self, mode: str, character: str = None, on_utterance=None) -> None:
+        """Switch between 'ambient' (overhear -> context) and 'converse' (reply to each
+        utterance). Called live from the game-mode toggle command. Resets the converse buffer
+        on entry so a switch doesn't replay stale audio."""
+        if character:
+            self._character = character
+        if on_utterance is not None:
+            self._on_utterance = on_utterance
+        self._cbuf = None
+        self._last_conv = ""
+        with self._lock:
+            self._pending = []                  # drop backlog so the new mode starts clean
+            self._lines.clear()                 # drop stale ambient lines from the other mode
+        self._mode = mode
+        print(f"[game-audio] mode -> {mode}" + (f" (talking with {self._character})"
+                                                if mode == "converse" else ""))
 
     def _loop(self):
         while self._running:
-            time.sleep(CADENCE_SEC)
-            if not self._running:
-                break
-            try:
-                win = self._drain_window()
-                if win is None or len(win) < TARGET_SR * 0.6:     # need ~>0.6s of audio
-                    continue
-                if not self._wernicke.speech_present(win):         # cheap VAD: skip music/silence
-                    continue
-                text = self._wernicke.transcribe(win)              # shared, locked Whisper
-                text = (text or "").strip()
-                if not text or text == self._last_text:
-                    continue
-                self._last_text = text
-                with self._lock:
-                    self._lines.append((time.time(), text))
-                    while len(self._lines) > MAX_LINES:
-                        self._lines.popleft()
-            except Exception as e:
-                print(f"[game-audio] pass error: {e}")
+            if self._mode == "converse":
+                time.sleep(CONV_TICK_SEC)
+                if self._running:
+                    try:
+                        self._converse_tick()
+                    except Exception as e:
+                        print(f"[game-audio] converse error: {e}")
+            else:
+                time.sleep(CADENCE_SEC)
+                if self._running:
+                    try:
+                        self._ambient_tick()
+                    except Exception as e:
+                        print(f"[game-audio] pass error: {e}")
+
+    def _ambient_tick(self):
+        win = self._drain_window()
+        if win is None or len(win) < TARGET_SR * 0.6:         # need ~>0.6s of audio
+            return
+        if not self._wernicke.speech_present(win):             # cheap VAD: skip music/silence
+            return
+        text = (self._wernicke.transcribe(win) or "").strip()  # shared, locked Whisper
+        if not text or text == self._last_text:
+            return
+        self._last_text = text
+        with self._lock:
+            self._lines.append((time.time(), text))
+            while len(self._lines) > MAX_LINES:
+                self._lines.popleft()
+
+    def _converse_tick(self):
+        """Endpoint the character's speech: grow a continuous buffer, and once they've gone quiet
+        for CONV_END_SILENCE (or the buffer hit the cap), transcribe the whole utterance and hand
+        it to on_utterance so Mira replies to it. Her own voice goes to the game's mic (a different
+        device), not this capture, so she never endpoints herself."""
+        np = self._np
+        SR = TARGET_SR
+        chunk = self._drain_all()
+        if chunk is not None and len(chunk):
+            self._cbuf = chunk if self._cbuf is None else np.concatenate([self._cbuf, chunk])
+        if self._cbuf is None or len(self._cbuf) < int(SR * 0.3):
+            return
+        seg = self._wernicke.speech_segments(self._cbuf)
+        if not seg:                                            # no speech yet -> keep a short lead-in
+            if len(self._cbuf) > SR // 2:
+                self._cbuf = self._cbuf[-(SR // 2):]
+            return
+        trailing = (len(self._cbuf) - seg[-1]["end"]) / SR
+        spoken = (seg[-1]["end"] - seg[0]["start"]) / SR
+        maxed = len(self._cbuf) / SR >= CONV_MAX_SEC
+        if not ((trailing >= CONV_END_SILENCE and spoken >= CONV_MIN_SPOKEN) or maxed):
+            return
+        text = (self._wernicke.transcribe(self._cbuf) or "").strip()
+        self._cbuf = None
+        if not text or text == self._last_conv:
+            return
+        self._last_conv = text
+        if self._on_utterance is not None:
+            self._on_utterance(text)
 
     # ---------------- ambient read ----------------
     def summary(self) -> str:

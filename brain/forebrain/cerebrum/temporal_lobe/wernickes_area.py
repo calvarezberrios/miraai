@@ -107,14 +107,21 @@ def _transcribe(buf):
         return " ".join(s.text.strip() for s in segments).strip()
 
 
+def speech_segments(audio):
+    """VAD speech timestamps for a 16 kHz mono float32 buffer: a list of {'start','end'} sample
+    offsets (empty if none). Used by the game-audio capturer to endpoint the character's
+    utterances (finalize once they've stopped talking)."""
+    try:
+        a = np.asarray(audio, dtype=np.float32)
+        return get_speech_timestamps(a, _vad_options) if len(a) else []
+    except Exception:
+        return []
+
+
 def speech_present(audio) -> bool:
     """Cheap VAD gate: True if the buffer (16 kHz mono float32) contains any speech. Used by the
     game-audio capturer to skip transcribing music/ambient — only actual spoken lines cost a decode."""
-    try:
-        a = np.asarray(audio, dtype=np.float32)
-        return bool(len(a) and get_speech_timestamps(a, _vad_options))
-    except Exception:
-        return False
+    return bool(speech_segments(audio))
 
 
 def transcribe(audio):

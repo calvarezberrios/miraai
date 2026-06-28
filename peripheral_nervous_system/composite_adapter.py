@@ -98,6 +98,19 @@ class CompositeAdapter(IOAdapter):
                 self._on_event(ev)
         return cb
 
+    def inject(self, event: InputEvent) -> None:
+        """Run an externally-sourced turn (e.g. game-audio conversation) through the SAME
+        serialization gate + channel routing as adapter turns, so it can't overlap a Discord/
+        Twitch turn and its reply is routed correctly (game_audio -> the VC)."""
+        if self._on_event is None:
+            return
+        with self._gate:
+            self._active_channel = event.channel
+            try:
+                self._on_event(event)
+            finally:
+                self._active_channel = ""
+
     # ---------------- mouth (all speech -> the voice adapter) ----------------
     def speak(self, text: str) -> None:
         if not text:
