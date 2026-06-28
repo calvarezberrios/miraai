@@ -83,33 +83,26 @@ class GameAudio:
             return False
         self._sd, self._np, self._wernicke = sd, np, wernickes_area
 
-        dev, channels = self._resolve_loopback_device()
+        dev, channels, loopback = self.resolve_device()
         if dev is None:
             return False
         try:
-            info = sd.query_devices(dev)
-            self._dev_sr = int(info.get("default_samplerate", 48000) or 48000)
-            extra = None
-            try:
-                extra = sd.WasapiSettings(loopback=True)   # capture the OUTPUT as input
-            except TypeError:
-                extra = None    # older sounddevice / non-WASAPI device chosen explicitly
-            self._stream = sd.InputStream(
-                device=dev, channels=channels, samplerate=self._dev_sr, dtype="float32",
-                blocksize=int(self._dev_sr * 0.1), callback=self._cb, extra_settings=extra,
-            )
+            self._stream = self.open_stream(dev, channels, loopback, self._cb)
             self._stream.start()
         except Exception as e:
-            print(f"[game-audio] couldn't open loopback on device {dev!r}: {e}\n"
-                  f"  Set MIRA_GAME_AUDIO_DEVICE to a loopback/'Stereo Mix' input, or update "
-                  f"python-sounddevice (>=0.5.0 for WasapiSettings(loopback=True)).")
+            print(f"[game-audio] couldn't open capture on device {dev!r}: {e}\n"
+                  f"  List devices:  python tools/check_capture.py devices\n"
+                  f"  Then set MIRA_GAME_AUDIO_DEVICE to a recordable output (a Voicemeeter/VB "
+                  f"'Output' bus, 'Stereo Mix', or 'CABLE Output'), or update python-sounddevice "
+                  f"(>=0.5.0 for WASAPI loopback).")
             return False
 
         self._running = True
         self._worker = threading.Thread(target=self._loop, name="game-audio", daemon=True)
         self._worker.start()
-        print(f"[game-audio] hearing the stream's output (device {dev!r} @ {self._dev_sr} Hz). "
-              f"Tagged as 'Game' so it's never confused with you.")
+        mode = "loopback" if loopback else "direct input"
+        print(f"[game-audio] hearing the output mix via {mode} (device {dev!r}, "
+              f"{channels}ch @ {self._dev_sr} Hz). Tagged as 'Game' so it's never confused with you.")
         return True
 
     def stop(self) -> None:
@@ -122,9 +115,19 @@ class GameAudio:
         if self._worker is not None:
             self._worker.join(timeout=3)
 
-    def _resolve_loopback_device(self):
-        """Pick the device to capture. Default: the default OUTPUT device (WASAPI loopback).
-        An explicit MIRA_GAME_AUDIO_DEVICE (index or name substring) overrides."""
+    def resolve_device(self):
+        """Pick what to capture and HOW. Returns (index, channels, use_loopback).
+
+        Two capture modes, chosen automatically:
+          * DIRECT INPUT — the device is already recordable (max_input_channels > 0): a
+            Voicemeeter/VB 'Output' bus, 'Stereo Mix', a 'CABLE Output', etc. We open it as a
+            normal input. This is the right path for a virtual-mixer setup like Voicemeeter.
+          * WASAPI LOOPBACK — a pure render (speaker) device: we capture what's played to it,
+            and MUST request the device's full output-channel count (downmixed in the callback)
+            or WASAPI rejects it with -9998.
+
+        MIRA_GAME_AUDIO_DEVICE (index or name substring) overrides the auto-pick.
+        """
         sd = self._sd
         want = (os.environ.get("MIRA_GAME_AUDIO_DEVICE", "").strip()
                 or _read_env_file(".env", "MIRA_GAME_AUDIO_DEVICE"))
@@ -135,18 +138,40 @@ class GameAudio:
                 else:
                     idx = next(i for i, d in enumerate(sd.query_devices())
                                if want.lower() in d["name"].lower())
-                ch = max(1, min(2, int(sd.query_devices(idx).get("max_input_channels", 2) or
-                                       sd.query_devices(idx).get("max_output_channels", 2) or 2)))
-                return idx, ch
-            # default output device -> loopback
+                return (idx, *self._mode_for(idx))
+            # auto: prefer the default OUTPUT via loopback (with the right channel count)
             out = sd.default.device[1] if isinstance(sd.default.device, (list, tuple)) else None
             if out is None or out < 0:
                 out = sd.query_hostapis(sd.default.hostapi)["default_output_device"]
-            ch = max(1, min(2, int(sd.query_devices(out).get("max_output_channels", 2) or 2)))
-            return out, ch
+            return (out, *self._mode_for(out))
         except Exception as e:
-            print(f"[game-audio] no loopback device found ({e}); set MIRA_GAME_AUDIO_DEVICE.")
-            return None, None
+            print(f"[game-audio] couldn't resolve a capture device ({e}); set MIRA_GAME_AUDIO_DEVICE.")
+            return None, None, None
+
+    def _mode_for(self, idx):
+        """(channels, use_loopback) for a device: record it directly if it's already an input,
+        else loopback the output with its full channel count."""
+        info = self._sd.query_devices(idx)
+        self._dev_sr = int(info.get("default_samplerate", 48000) or 48000)
+        in_ch = int(info.get("max_input_channels", 0) or 0)
+        out_ch = int(info.get("max_output_channels", 0) or 0)
+        if in_ch > 0:
+            return max(1, min(2, in_ch)), False             # directly recordable -> normal input
+        return max(1, out_ch or 2), True                    # render device -> WASAPI loopback
+
+    def open_stream(self, idx, channels, loopback, callback):
+        """Open the capture InputStream — WASAPI loopback only when capturing a render device."""
+        sd = self._sd
+        extra = None
+        if loopback:
+            try:
+                extra = sd.WasapiSettings(loopback=True)
+            except TypeError:
+                extra = None                                 # older sounddevice; rely on direct input
+        return sd.InputStream(
+            device=idx, channels=channels, samplerate=self._dev_sr, dtype="float32",
+            blocksize=int(self._dev_sr * 0.1), callback=callback, extra_settings=extra,
+        )
 
     # ---------------- capture ----------------
     def _cb(self, indata, frames, time_info, status):
