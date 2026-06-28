@@ -7,12 +7,15 @@ check here means the live run will work too.
     python tools/check_capture.py              # run every check
     python tools/check_capture.py twitch       # just the Twitch status (Helix) auth
     python tools/check_capture.py audio vision # any subset
+    python tools/check_capture.py devices      # list audio devices (to pick game-audio capture)
 
 Checks:
     twitch  - Helix app-token auth + your stream's live/offline + viewers + game
     chat    - anonymous IRC connect + JOIN your channel, confirm chat is readable
-    audio   - open the WASAPI loopback and measure the level (PLAY SOME AUDIO during this)
+    audio   - open the capture (loopback or direct input) and measure the level (PLAY AUDIO)
     vision  - grab a screen frame and caption it via the laptop VL endpoint
+    devices - (helper) print every audio device + channel counts so you can set
+              MIRA_GAME_AUDIO_DEVICE
 
 Exit code is 0 only if every requested check passes.
 """
@@ -118,8 +121,30 @@ def check_chat() -> bool:
 
 
 # ---------------------------------------------------------------------------
+def list_devices() -> bool:
+    _hdr("audio devices")
+    try:
+        import sounddevice as sd
+    except Exception as e:
+        print(f"{NO} sounddevice missing: {e}")
+        return False
+    try:
+        default_out = sd.default.device[1] if isinstance(sd.default.device, (list, tuple)) else None
+    except Exception:
+        default_out = None
+    print("  idx  in/out  rate    name   (★=default output; pick a recordable OUTPUT for game audio)")
+    for i, d in enumerate(sd.query_devices()):
+        star = "★" if i == default_out else " "
+        rec = "rec" if d["max_input_channels"] > 0 else "   "
+        print(f"  {i:>3} {star} {d['max_input_channels']}/{d['max_output_channels']:<2} "
+              f"{rec} {int(d['default_samplerate'] or 0):>6}  {d['name']}")
+    print("\n  Set it in .env:  MIRA_GAME_AUDIO_DEVICE=<index or a name substring>")
+    print("  For Voicemeeter, the recordable 'Voicemeeter Out B1/B2/Output' bus (in>0) is ideal.")
+    return True
+
+
 def check_audio() -> bool:
-    _hdr("game audio (WASAPI loopback)")
+    _hdr("game audio capture")
     try:
         import sounddevice as sd
         import numpy as np
@@ -129,31 +154,27 @@ def check_audio() -> bool:
     from peripheral_nervous_system.game_audio import GameAudio
     ga = GameAudio()
     ga._sd, ga._np = sd, np
-    dev, channels = ga._resolve_loopback_device()
+    dev, channels, loopback = ga.resolve_device()
     if dev is None:
-        print(f"{NO} no loopback device — set MIRA_GAME_AUDIO_DEVICE to a 'Stereo Mix' input")
+        print(f"{NO} no capture device — run 'python tools/check_capture.py devices' and set "
+              f"MIRA_GAME_AUDIO_DEVICE")
         return False
     try:
         name = sd.query_devices(dev)["name"]
-        sr = int(sd.query_devices(dev).get("default_samplerate", 48000) or 48000)
     except Exception:
-        name, sr = str(dev), 48000
-    print(f"     device: {name!r} @ {sr} Hz")
+        name = str(dev)
+    mode = "WASAPI loopback" if loopback else "direct input"
+    print(f"     device: {name!r}  ({channels}ch @ {ga._dev_sr} Hz, {mode})")
     print(f"     >>> PLAY SOME AUDIO now (a video / the game) — capturing 3s...")
     frames = []
     try:
-        extra = None
-        try:
-            extra = sd.WasapiSettings(loopback=True)
-        except TypeError:
-            extra = None
-        with sd.InputStream(device=dev, channels=channels, samplerate=sr, dtype="float32",
-                            extra_settings=extra,
-                            callback=lambda d, n, t, s: frames.append(d.copy())):
+        with ga.open_stream(dev, channels, loopback,
+                            lambda d, n, t, s: frames.append(d.copy())):
             time.sleep(3.0)
     except Exception as e:
-        print(f"{NO} couldn't open the loopback stream: {e}\n"
-              f"     Update python-sounddevice (>=0.5.0) or set MIRA_GAME_AUDIO_DEVICE.")
+        print(f"{NO} couldn't open the stream: {e}\n"
+              f"     Run 'python tools/check_capture.py devices' and set MIRA_GAME_AUDIO_DEVICE "
+              f"to a recordable output (Voicemeeter 'Out' bus / 'Stereo Mix' / 'CABLE Output').")
         return False
     if not frames:
         print(f"{NO} no audio frames captured at all (driver issue?)")
@@ -201,11 +222,19 @@ def check_vision() -> bool:
 
 # ---------------------------------------------------------------------------
 CHECKS = {"twitch": check_twitch, "chat": check_chat, "audio": check_audio, "vision": check_vision}
+# 'devices' is a helper listing, not a pass/fail check — excluded from the default run.
+HELPERS = {"devices": list_devices}
 
 
 def main(argv) -> int:
     load_env()
-    names = [a.lower() for a in argv if a.lower() in CHECKS] or list(CHECKS)
+    requested = [a.lower() for a in argv]
+    # A helper like 'devices' just prints and exits (don't run the full suite alongside it).
+    helpers = [h for h in requested if h in HELPERS]
+    if helpers:
+        ok = all(HELPERS[h]() for h in helpers)
+        return 0 if ok else 1
+    names = [a for a in requested if a in CHECKS] or list(CHECKS)
     results = {}
     for n in names:
         try:
