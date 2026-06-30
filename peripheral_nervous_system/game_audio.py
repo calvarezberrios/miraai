@@ -147,29 +147,57 @@ class GameAudio:
               f"{self._remote_url}  (tagged 'Game', never confused with you).")
         return True
 
+    def _try_rediscover(self) -> bool:
+        """The desktop companion stopped answering — its DHCP IP may have moved. Rescan the LAN
+        for it and re-point self._remote_url. Returns True if a new host was found."""
+        from peripheral_nervous_system import lan_discovery as lan
+        if not (self._remote_url and lan.enabled()):
+            return False
+        cur = lan.host_of(self._remote_url)
+        print("[game-audio] companion unreachable — scanning the LAN for it...")
+        host = lan.find_companion(port=lan.port_of(self._remote_url), exclude=cur)
+        if host and host != cur:
+            self._remote_url = lan.repoint_url(self._remote_url, host)
+            print(f"[game-audio] found it — re-pointed to {self._remote_url}")
+            return True
+        print("[game-audio] companion not found on the LAN (is desktop_senses.py running?).")
+        return False
+
     def _remote_loop(self):
         import json
         import urllib.request
-        seq = 0
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # LAN: never via a proxy
+
+        def head_seq():
+            """Current head sequence on the companion, so we don't replay its backlog."""
+            try:
+                with opener.open(self._remote_url + "?since=0", timeout=5) as r:
+                    return int(json.loads(r.read()).get("last", 0))
+            except Exception:
+                return 0
+
+        seq = head_seq()
         warned = False
-        # Don't replay backlog: jump to the companion's current head on first contact.
-        try:
-            with urllib.request.urlopen(self._remote_url + "?since=0", timeout=5) as r:
-                seq = int(json.loads(r.read()).get("last", 0))
-        except Exception:
-            pass
+        fails = 0
         while self._running:
             time.sleep(CADENCE_SEC if self._mode != "converse" else CONV_TICK_SEC * 4)
             if not self._running:
                 break
             try:
-                with urllib.request.urlopen(f"{self._remote_url}?since={seq}", timeout=5) as r:
+                with opener.open(f"{self._remote_url}?since={seq}", timeout=5) as r:
                     data = json.loads(r.read())
                 warned = False
+                fails = 0
             except Exception as e:
+                fails += 1
                 if not warned:
                     print(f"[game-audio] desktop companion unreachable ({e}); is it running + firewall open?")
                     warned = True
+                # Self-heal a moved desktop (DHCP): rescan the LAN and re-point, then re-baseline
+                # the sequence to the new host's head so we don't dump its whole backlog.
+                if fails in (3, 12, 40) and self._try_rediscover():
+                    seq = head_seq()
+                    warned = False
                 continue
             seq = int(data.get("last", seq))
             for item in data.get("lines", []):

@@ -135,6 +135,13 @@ two makes the laptop capture itself instead — useful only if everything moves 
 
 > **IPs are DHCP** — recheck the desktop's IP each session (the companion prints it), or set a
 > router reservation so it stays fixed.
+>
+> **Auto-discovery (self-healing):** if the desktop's IP moves and `DESKTOP_IP` goes stale, the
+> laptop notices the timeouts, **rescans the LAN for the companion** (a host answering
+> `/health` with `ok` on `:8200`), and re-points itself — you'll see `[vision] found it —
+> re-pointed to ...` / `[game-audio] found it — ...` in the laptop console, and senses come back
+> in ~20–30s without editing anything. Keeping `DESKTOP_IP` current just avoids that initial
+> reconnect delay. Disable the scan with `MIRA_SENSES_AUTODISCOVER=0`.
 
 ---
 

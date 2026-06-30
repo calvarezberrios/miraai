@@ -50,6 +50,8 @@ class StreamVision:
         self._client = None
         self._model = ""
         self._grab = None                  # callable -> PIL.Image of the screen
+        self._frame_url = ""               # remote frame URL (set in remote mode; mutable for re-point)
+        self._opener = None                # proxy-bypass urllib opener for the remote fetch
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -114,21 +116,42 @@ class StreamVision:
     def _init_remote_capture(self, url: str) -> bool:
         """Frame source = the desktop senses companion (tools/desktop_senses.py serving /frame).
         Mira runs on the laptop; the screen lives on the desktop, so we fetch the JPEG over the
-        LAN instead of grabbing a local monitor. Captioning still happens on the local VL."""
+        LAN instead of grabbing a local monitor. Captioning still happens on the local VL.
+
+        The URL is mutable (`self._frame_url`) so that if the desktop's DHCP IP moves and fetches
+        start timing out, _loop can rescan the LAN and re-point without a restart."""
         try:
             import urllib.request
             from PIL import Image
         except Exception as e:
             print(f"[vision] disabled — remote frame needs Pillow ({e})")
             return False
+        self._frame_url = url
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # LAN: no proxy
 
         def grab():
-            with urllib.request.urlopen(url, timeout=5) as r:
+            with self._opener.open(self._frame_url, timeout=5) as r:
                 data = r.read()
             return Image.open(io.BytesIO(data)).convert("RGB")
         self._grab = grab
         print(f"[vision] pulling screen frames from the desktop senses companion: {url}")
         return True
+
+    def _try_rediscover(self) -> bool:
+        """The desktop senses companion stopped answering — its DHCP IP may have moved. Rescan
+        the LAN for it and re-point self._frame_url. Returns True if we found a new host."""
+        from peripheral_nervous_system import lan_discovery as lan
+        if not (self._frame_url and lan.enabled()):
+            return False
+        cur = lan.host_of(self._frame_url)
+        print("[vision] frame source unreachable — scanning the LAN for the senses companion...")
+        host = lan.find_companion(port=lan.port_of(self._frame_url), exclude=cur)
+        if host and host != cur:
+            self._frame_url = lan.repoint_url(self._frame_url, host)
+            print(f"[vision] found it — re-pointed to {self._frame_url}")
+            return True
+        print("[vision] companion not found on the LAN (is desktop_senses.py running?).")
+        return False
 
     def _pick_monitor(self, sct):
         """Choose which monitor to watch. MIRA_VISION_MONITOR=<index> forces one; otherwise
@@ -207,6 +230,14 @@ class StreamVision:
                 if fails in (1, 5, 20):     # don't spam: report the first, then occasionally
                     print(f"[vision] caption failed ({e}); is the VL endpoint up + the frame "
                           f"source reachable?")
+                # Self-heal a moved desktop: after a few straight failures on a REMOTE frame
+                # source, rescan the LAN and re-point. Retried periodically while it stays down.
+                if getattr(self, "_frame_url", "") and fails in (3, 12, 40):
+                    try:
+                        if self._try_rediscover():
+                            fails = 0
+                    except Exception as de:
+                        print(f"[vision] rediscover error: {de}")
             time.sleep(CAPTURE_SEC)
 
     # ---------------- ambient read ----------------
