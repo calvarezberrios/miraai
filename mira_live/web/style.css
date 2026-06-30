@@ -44,13 +44,21 @@ body {
 #new-chat:hover { filter: brightness(1.08); }
 .session-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .session-item {
-  padding: 9px 10px; border-radius: 8px; cursor: pointer; color: var(--text);
+  display: flex; align-items: center; gap: 4px;
+  padding: 7px 6px 7px 10px; border-radius: 8px; color: var(--text);
   background: transparent; border: 1px solid transparent; font-size: 13px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .session-item:hover { background: var(--panel-2); }
 .session-item.active { background: var(--panel-2); border-color: var(--border); }
+.session-main { flex: 1; min-width: 0; cursor: pointer; }
+.session-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-item .meta { color: var(--muted); font-size: 11px; }
+.session-del {
+  flex-shrink: 0; opacity: 0; background: transparent; border: 0; color: var(--muted);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 5px 7px; border-radius: 6px;
+}
+.session-item:hover .session-del { opacity: .7; }
+.session-del:hover { opacity: 1; background: #3a2030; color: var(--accent); }
 .sidebar-foot { border-top: 1px solid var(--border); padding-top: 8px; }
 
 /* ---------- Stage (avatar) ---------- */

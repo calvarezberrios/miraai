@@ -49,6 +49,18 @@ def load(session_id: str) -> Optional[Dict]:
         return None
 
 
+def delete(session_id: str) -> bool:
+    """Remove a session's transcript file. Returns True if it existed and was deleted."""
+    p = _path(session_id)
+    try:
+        if os.path.exists(p):
+            os.remove(p)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def append(session_id: str, role: str, content: str) -> Optional[Dict]:
     s = load(session_id)
     if s is None:

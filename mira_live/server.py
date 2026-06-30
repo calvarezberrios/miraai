@@ -61,6 +61,12 @@ def api_get_session(session_id: str):
     return s
 
 
+@app.delete("/api/sessions/{session_id}")
+def api_delete_session(session_id: str):
+    ok = sessions.delete(session_id)
+    return JSONResponse({"deleted": ok}, status_code=200 if ok else 404)
+
+
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
     await ws.accept()

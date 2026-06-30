@@ -119,9 +119,30 @@ async function refreshSessions() {
     item.className = "session-item" + (s.id === state.sessionId ? " active" : "");
     item.dataset.id = s.id;
     const when = new Date((s.created || 0) * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    item.innerHTML = `<div>${escapeHtml(s.title)}</div><div class="meta">${when} · ${s.count} msgs</div>`;
-    item.addEventListener("click", () => openSession(s.id));
+    item.innerHTML = `
+      <div class="session-main">
+        <div class="session-title">${escapeHtml(s.title)}</div>
+        <div class="meta">${when} · ${s.count} msgs</div>
+      </div>
+      <button class="session-del" title="Delete chat" aria-label="Delete chat">🗑</button>`;
+    item.querySelector(".session-main").addEventListener("click", () => openSession(s.id));
+    item.querySelector(".session-del").addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteSession(s.id, s.title);
+    });
     sessionListEl.appendChild(item);
+  }
+}
+
+async function deleteSession(id, title) {
+  if (!confirm(`Delete this chat?\n\n"${title}"\n\nThis can’t be undone.`)) return;
+  try {
+    await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+  } catch (e) { /* ignore; refresh below reflects reality */ }
+  if (state.sessionId === id) {
+    await newChat();          // the open chat was deleted -> start a fresh one
+  } else {
+    await refreshSessions();
   }
 }
 
