@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mira Live</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar: sessions -->
+    <aside id="sidebar">
+      <div class="brand">🦊 <span>Mira Live</span></div>
+      <button id="new-chat">+ New chat</button>
+      <div id="session-list" class="session-list"></div>
+      <div class="sidebar-foot">
+        <div id="model-tag" class="muted">model: …</div>
+      </div>
+    </aside>
+
+    <!-- Stage: avatar "webcam" -->
+    <main id="stage">
+      <div id="avatar-frame">
+        <div id="avatar-placeholder">
+          <div class="ph-title">Avatar stage</div>
+          <div class="ph-sub muted">The VRM avatar mounts here next phase — move / zoom / rotate,
+            and shareable to OBS by LAN IP.</div>
+        </div>
+      </div>
+      <div id="context-bar" title="Context used in this session">
+        <div id="context-fill"></div>
+        <span id="context-label">0 / 0 tokens</span>
+      </div>
+    </main>
+
+    <!-- Chat panel -->
+    <section id="chat-panel">
+      <header class="chat-head">
+        <span id="chat-title">New chat</span>
+      </header>
+      <div id="messages" class="messages"></div>
+      <div id="composer">
+        <textarea id="input" rows="1" placeholder="Talk to Mira…  (Enter to send)"></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div id="status" class="muted"></div>
+    </section>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

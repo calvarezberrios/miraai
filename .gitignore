@@ -91,3 +91,6 @@ avatar/animations/
 # RVC model files / archives (placed by user, not in repo) — ignore the whole dir
 rvc_models/
 *.zip
+
+# Mira Live session transcripts (local only)
+mira_live/sessions/
