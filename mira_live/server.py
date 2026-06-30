@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config, sessions
+from .clean import clean
 from .llm import LLM
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,7 +93,9 @@ async def ws_chat(ws: WebSocket):
                                         "limit": config.CONTEXT_LIMIT})
                 elif kind == "error":
                     await ws.send_json({"type": "error", "message": payload})
-            reply = "".join(reply_parts).strip()
+            # Clean to plain spoken text (drop *actions*/emoji/markdown Hermes adds) for the saved
+            # transcript and the final bubble — and, later, for TTS.
+            reply = clean("".join(reply_parts))
             if reply:
                 sessions.append(session_id, "assistant", reply)
             await ws.send_json({"type": "end", "reply": reply})

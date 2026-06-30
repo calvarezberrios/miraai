@@ -44,6 +44,8 @@ function handleServer(msg) {
         state.curMiraEl.body.textContent = "(no response — is LM Studio's server running with a model loaded?)";
       break;
     case "end":
+      // Snap the bubble to the cleaned final text (no *actions*/emoji that streamed raw).
+      if (state.curMiraEl && msg.reply) state.curMiraEl.body.textContent = msg.reply;
       state.streaming = false; sendBtn.disabled = false; setStatus(""); state.curMiraEl = null;
       refreshSessions();
       break;
