@@ -69,6 +69,15 @@ class LLM:
                 max_tokens=config.MAX_TOKENS,
                 stream=True,
                 stream_options={"include_usage": True},
+                # llama.cpp's stronger anti-repeat samplers (DRY stops verbatim phrase loops).
+                # extra_body is merged into the request JSON; non-supporting servers ignore it.
+                extra_body={
+                    "repeat_penalty": config.REPEAT_PENALTY,
+                    "repeat_last_n": config.REPEAT_LAST_N,
+                    "dry_multiplier": config.DRY_MULTIPLIER,
+                    "dry_base": config.DRY_BASE,
+                    "dry_allowed_length": config.DRY_ALLOWED_LENGTH,
+                },
             )
         except Exception as e:
             yield ("error", f"{e}")

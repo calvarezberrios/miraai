@@ -20,8 +20,10 @@ _EMOJI = re.compile(
     "\U0001F1E6-\U0001F1FF"
     "\U00002190-\U000021FF"
     "\U00002B00-\U00002BFF"
-    "\U0000FE00-\U0000FE0F"
-    "\U00002022"           # bullet
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200B-\U0000200D"  # zero-width space/non-joiner/joiner (emoji-strip leftovers)
+    "\U00002060\U0000FEFF"   # word-joiner / BOM
+    "\U00002022"             # bullet
     "]"
 )
 
