@@ -42,7 +42,7 @@ cd /d "%~dp0"
 
 REM EDIT each session: the DESKTOP's current LAN IP (desktop_senses.py prints it; DHCP).
 REM This is where Mira pulls the screen frames + transcribed game dialogue from.
-set DESKTOP_IP=192.168.12.151
+set DESKTOP_IP=192.168.12.216
 
 REM --- 1. Local BRAIN + EYES: Qwen2.5-VL-7B on :8080 --------------------------
 REM run-mira-vision.ps1 auto-detects this no-D: laptop (C:\models, CUDA 12.8 image), loads the

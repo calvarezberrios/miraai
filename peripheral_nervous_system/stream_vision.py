@@ -32,6 +32,11 @@ from typing import Optional
 
 CAPTURE_SEC = float(os.environ.get("MIRA_VISION_EVERY", "8"))
 MAX_DIM = int(os.environ.get("MIRA_VISION_MAX_DIM", "768"))
+# How long a caption stays usable before summary() treats it as stale and says nothing. The
+# captioner shares the VL server with her chat brain, so under load a caption can be a bit old;
+# a generous window means she still describes the screen (a few moments old) instead of falsely
+# saying "I can't see." Tune with MIRA_VISION_STALE_SEC.
+STALE_SEC = float(os.environ.get("MIRA_VISION_STALE_SEC", "120"))
 # MIRA_VISION_MONITOR: a specific mss monitor index, or unset/"" = auto-pick the PRIMARY
 # (main) monitor. Index 0 is the all-screens virtual desktop; 1+ are individual monitors.
 
@@ -180,29 +185,41 @@ class StreamVision:
 
     def _loop(self):
         fails = 0
+        first = True
         while self._running:
-            time.sleep(CAPTURE_SEC)
-            if not self._running:
-                break
+            # Caption FIRST, sleep after — so the very first caption lands within a few seconds
+            # of startup instead of after a full CAPTURE_SEC blind window (the gap where "what do
+            # you see?" used to get "I can't see").
             try:
                 uri = self._frame_data_uri()
-                if not uri:
-                    continue
-                cap = self._caption_frame(uri)
-                if cap:
-                    with self._lock:
-                        self._caption = cap
-                        self._caption_ts = time.time()
-                    fails = 0
+                if uri:
+                    cap = self._caption_frame(uri)
+                    if cap:
+                        with self._lock:
+                            self._caption = cap
+                            self._caption_ts = time.time()
+                        if first:
+                            print(f"[vision] eyes online — first caption: {cap}")
+                            first = False
+                        fails = 0
             except Exception as e:
                 fails += 1
-                if fails in (1, 5):     # don't spam: report the first, then every few
-                    print(f"[vision] caption failed ({e}); is the laptop VL endpoint up?")
+                if fails in (1, 5, 20):     # don't spam: report the first, then occasionally
+                    print(f"[vision] caption failed ({e}); is the VL endpoint up + the frame "
+                          f"source reachable?")
+            time.sleep(CAPTURE_SEC)
 
     # ---------------- ambient read ----------------
     def summary(self) -> str:
         with self._lock:
             cap, ts = self._caption, self._caption_ts
-        if not cap or time.time() - ts > max(CAPTURE_SEC * 4, 30):
-            return ""                      # stale (endpoint stalled) -> say nothing rather than lie
-        return f"On screen right now: {cap}"
+        if not cap:
+            return ""
+        age = time.time() - ts
+        if age > STALE_SEC:
+            return ""                      # endpoint stalled for a long time -> say nothing vs lie
+        # Assert she's actually LOOKING at it (the weak VL needs telling it has eyes), and flag
+        # when the view is a little old so she doesn't state stale detail as this-instant fact.
+        when = "right now" if age <= max(CAPTURE_SEC * 2, 16) else "a few moments ago"
+        return (f"You can SEE the stream screen — this is your own live view. On screen {when}: "
+                f"{cap} Talk about it naturally as something you're looking at.")
