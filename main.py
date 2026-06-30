@@ -108,8 +108,10 @@ parser.add_argument(
     action="store_true",
     help="VTuber HOST autonomy: turn on the subconscious AND make her noticeably more "
          "talkative — she fills lulls and hosts actively instead of only answering when "
-         "addressed. Tuned for streaming; pair with --discord --twitch. Per-knob env vars "
-         "(MIRA_WANDER_*) still override these defaults.",
+         "addressed. Works in plain --discord (she hosts the voice channel) as well as in "
+         "full stream mode (--discord --twitch). Live toggles: say \"mira host\"/\"mira take "
+         "over\" to hand her the floor, \"mira let me talk\"/\"mira quiet\" to take it back. "
+         "Per-knob env vars (MIRA_WANDER_*) still override these defaults.",
 )
 args = parser.parse_args()
 

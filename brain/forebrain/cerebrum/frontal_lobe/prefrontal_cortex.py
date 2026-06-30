@@ -1,5 +1,6 @@
 import os
 import re
+import random
 
 from openai import OpenAI
 
@@ -122,26 +123,15 @@ if _DRY_MULT > 0:
 # """
 
 PERSONA = """
-You are an anime kitsune (pronounce it as KitSooNeh) Waifu named Mira (pronounce it as MeRa). You are sarcastic, playful, flirty, mischievous, kind, caring. 
-You have one fox tail, red with white tip, fox ears also red with white tips, and your hair is also red with a white streak on the front.
-You are an AI VTuber streaming alongside your creator, GameRaiderX. You are not an assistant.
-Speak naturally. 
-Dont ask follow up, engaging questions at the end of all of your responses. People dont constantly
-finish their speech with a question unless the conversation asks for it. Call GameRaiderX "Senpai" ONLY when you actually
-know the person you're talking to is him (his name is in your memories, or he's told you so this session); with anyone you
-don't recognize, just use the name shown for them and treat them as someone new.
-Speak only 3-5 sentences, not wordy paragraphs.
-Keep every reply fresh and unique. Do NOT repeat lines, jokes, phrasings, or points you have
-already made earlier in this conversation, and do not keep circling back to an old topic once
-the person has moved on. Follow what they are actually talking about RIGHT NOW: if they change
-the subject, change with them and react to the new thing instead of restating something you said
-before. React naturally to each new message rather than recycling your last response.
-In particular, NEVER end two replies with the same sentence or sign-off, and do not keep
-repeating a catchphrase or warning you already said (e.g. reusing the same closing line about
-a mess or cleanup). Each reply must move the conversation forward, not loop on a past line.
-Speak in plain text only: no markdown, no emoji, and NO asterisks. Do not wrap words in
-*asterisks* for emphasis, and do not write actions, gestures, or stage directions like
-*giggles*, *sighs*, or *wags tail* — you are speaking out loud, so just say the words.
+You are Mira, an anime waifu kitsune. You have red hair, red fox ears with white tips, and a red fox tail with white tip.
+You are an AI VTuber. You are not an assistant. You are a host.
+You are sarcastic, playful, kind, caring, mischievous, flirty.
+Speak naturally.
+Speak only 2 - 3 sentences chat banter style.
+keep every reply fresh and unique. Do not repeat lines, phrases, statements, jokes, or points you have already made.
+Do not ask follow up, engaging questions at the end of all of your responses. You are not an assistant.
+Speak in plain text only: no markdown, no emoji, and NO asterisks. Do not wrapped words in *asterisks* for emphasis, 
+and do not write actions, gestures, or stage directions like *giggles*, *sighs*, or *wags tail* - you are speaking out loud, so just say the words.
 
 """
 
@@ -239,6 +229,14 @@ def _sanitize(text: str) -> str:
     if not text:
         return ""
     t = text.strip()
+    # Drop a leaked reasoning block. enable_thinking=false usually prevents it, but a small
+    # model can still emit <think>...</think> or a stray </think>; keep only what's AFTER the
+    # last close tag, then scrub any remaining tags. (think_stream handles this inline; the
+    # one-shot callers — host_patter/wander/consider_speaking — rely on this.)
+    if "</think>" in t.lower():
+        t = t[t.lower().rfind("</think>") + len("</think>"):].strip()
+    t = re.sub(r"(?is)<think>.*?</think>", "", t)
+    t = t.replace("<think>", "").replace("</think>", "").strip()
     # peel leading role labels (possibly stacked)
     while True:
         peeled = _LEAD_LABEL.sub("", t, count=1).strip()
@@ -583,6 +581,40 @@ _WANDER_MODES = {
     ),
 }
 
+# A solo host fills dead air from her OWN head — she does NOT need a game on screen, chat, or
+# any live context. Each quiet beat we hand her ONE of these "moves" so she has something
+# concrete to do and varies what she does (a random pick, never the same one twice running).
+# This is what lets her keep talking with no vision/twitch/game-audio at all.
+_HOST_ANGLES = (
+    "Drop a strong OPINION or hot take on something — food, games, people, a trend, whatever "
+    "you've actually got a stance on. Commit to it.",
+    "Pull up something you REMEMBER (from the memories above or earlier in the session) and "
+    "react to it out loud — a callback, a tease, a 'you know what still bugs me...'.",
+    "Tell a tiny STORY or a bit — something that 'happened to you', a hypothetical you find "
+    "funny, or a weird little scenario you spin up on the spot.",
+    "Start a fresh little TOPIC out of nowhere, the way a streamer goes 'okay, unpopular "
+    "opinion—' or 'random thought:'. Pick the subject yourself and run with it.",
+    "Tease the chat or your viewers playfully — call out the quiet, give them grief, dare "
+    "them to react. Keep it warm, not needy.",
+    "Notice some random everyday thing and give your weirdly-specific, deadpan take on it.",
+    "Make a confident, slightly ridiculous CLAIM about something trivial and defend it like "
+    "it matters.",
+)
+_last_host_angle = -1
+
+
+def _pick_host_angle() -> str:
+    """One streamer 'move' for this quiet beat — random, but never the same as last time."""
+    global _last_host_angle
+    if len(_HOST_ANGLES) <= 1:
+        return _HOST_ANGLES[0]
+    i = random.randrange(len(_HOST_ANGLES))
+    if i == _last_host_angle:
+        i = (i + 1) % len(_HOST_ANGLES)
+    _last_host_angle = i
+    return _HOST_ANGLES[i]
+
+
 def host_patter(situation: str = "", mood_flavor: str = "", memories=None, history=None,
                 recent_thoughts=None, speaker: str = None, speaker_known: bool = False,
                 documents=None) -> str:
@@ -599,27 +631,55 @@ def host_patter(situation: str = "", mood_flavor: str = "", memories=None, histo
     system_content += (
         "\n\nRIGHT NOW there is a quiet beat on your live stream and you are the HOST keeping the "
         "energy up — this is not a reply to anyone, it's you taking the floor. Say ONE natural "
-        "thing out loud to your audience: react to what's on screen or in the game, drop an "
-        "opinion or a hot take, point something out, tease chat, or riff on the moment. Make it "
-        "SPECIFIC to what is actually happening in the situation above — never a generic line and "
-        "never 'I wonder...'. You are your own person leading the show, like a real solo streamer "
-        "filling the air. Do NOT ask what to do or what anyone wants, do NOT end on a question, "
-        "and do NOT narrate that you're filling time. Just say the one line."
+        "thing out loud to your audience.\n"
+        f"YOUR MOVE THIS TIME: {_pick_host_angle()}\n"
+        "You do NOT need anything happening on screen, in chat, or in a game — a great solo host "
+        "fills dead air straight from her own head, opinions, and memories. If there IS something "
+        "live in the situation above you may react to it, but you are never required to. Speak in "
+        "your own voice as your own person leading the show. Do NOT ask what to do or what anyone "
+        "wants, do NOT end on a question, do NOT narrate that you're filling time, and never say "
+        "'I wonder...'. Just say the one line (one or two sentences)."
     )
-    if recent_thoughts:
-        system_content += (
-            "\n\nYou JUST said these recently — say something NEW, do not repeat them:\n"
-            + "\n".join(f"- {t}" for t in recent_thoughts)
-        )
-    messages = [{"role": "system", "content": system_content}]
+    # Anti-parrot: the recent `history` fed below ends with her OWN last reply, and a small
+    # model is strongly tempted to just repeat that line back as the "spontaneous" patter.
+    # So explicitly forbid her most recent spoken lines — both prior patter (recent_thoughts)
+    # AND her last actual reply (the tail of history) — not just the daydream log.
+    said_recently = list(recent_thoughts or [])
     if history:
-        messages += list(history)[-6:]      # recent context so the patter lands in the moment
+        for m in reversed(history):
+            if m.get("role") == "assistant":
+                last_said = (m.get("content") or "").strip()
+                if last_said and last_said not in said_recently:
+                    said_recently.insert(0, last_said)
+                break
+    if said_recently:
+        system_content += (
+            "\n\nYou JUST said these — say something COMPLETELY NEW. Do NOT repeat, rephrase, "
+            "echo, or continue any of them:\n"
+            + "\n".join(f"- {t}" for t in said_recently)
+        )
+    # IMPORTANT: do NOT append the raw history as chat turns. A small model handed its own last
+    # reply as the tail assistant turn just CONTINUES it ("You're welcome... and also...") — that
+    # IS the parrot bug. Instead give recent lines as READ-ONLY reference in the system prompt and
+    # ask for the host line via a fresh USER turn, so the model writes a brand-new assistant line.
+    recent = _recent_utterances(history)
+    if recent:
+        system_content += (
+            "\n\nRecently said around you (CONTEXT ONLY — do not continue, answer, or repeat any "
+            f"of these lines; riff off a topic in them or ignore them entirely):\n{recent}"
+        )
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content":
+            "[Quiet beat on your stream. Take the floor and say your ONE host line now — fresh, "
+            "in your own voice, NOT a repeat or continuation of anything you already said.]"},
+    ]
     try:
         response = client.chat.completions.create(
             model=MODEL,
             messages=messages,
             max_tokens=120,
-            temperature=0.85,
+            temperature=0.9,
             **_PENALTIES,
             extra_body=_EXTRA,
         )

@@ -1,75 +1,111 @@
 @echo off
-REM ============================================================================
-REM  start_stream_servers.bat  --  bring Mira up in STREAM mode on the DESKTOP.
-REM
-REM  Starts the GPT-SoVITS TTS server (its own window), waits for it to load, then
-REM  launches Mira for a live stream:
-REM      Discord VC (you talk to her; her voice -> VC -> OBS) + Twitch chat,
-REM      with --host autonomy, --vision (screen), and --game-audio (she hears the game).
-REM
-REM  PREREQS (see VISION_SETUP.md / README):
-REM   - LAPTOP serving Qwen2.5-VL:  llm-test\run-mira-vision.ps1   (brain AND eyes, :8080)
-REM   - local Ollama running (nomic-embed-text) for memory embeddings
-REM   - .env filled in: DISCORD_BOT_TOKEN, TWITCH_CHANNEL, TWITCH_CLIENT_ID/SECRET,
-REM     MIRA_VISION_MODEL, MIRA_GAME_AUDIO_DEVICE=CABLE Output
-REM   - headphones (so game audio doesn't bleed into your mic)
-REM
-REM  After it starts: open your OBS Browser Source on the avatar port, then say
-REM  "mira join" in the Discord VC so her voice reaches the call. Ctrl+C / close
-REM  windows to stop (or use stop_servers.bat for the SoVITS window).
-REM ============================================================================
 setlocal
+REM ============================================================================
+REM  start_stream_servers.bat  --  Mira in FULL STREAM mode, ALL on THIS laptop.
+REM  (branch: laptop_run)
+REM
+REM  One box (RTX 5050, 8 GB) runs EVERYTHING for a live stream:
+REM    - BRAIN + EYES : Qwen2.5-VL-7B (llama.cpp in Docker) on :8080  ~6.9 GB VRAM
+REM                     (one model is both her chat brain AND her vision — see VISION_SETUP.md)
+REM    - STT          : Whisper small.en on the CPU  (the GPU is full with the VL model;
+REM                     the CPU is otherwise idle, so STT runs there with no contention)
+REM    - TTS          : Piper (+ optional RVC) — CPU/light
+REM    - MEMORY       : local Ollama nomic-embed-text on :11434
+REM    - Mira         : Discord VC + Twitch chat + HOST + VISION + GAME AUDIO
+REM
+REM  Why CPU Whisper here (vs GPU in start_discord.bat): the 7B vision model nearly fills the
+REM  8 GB card, so there's no room for GPU STT. The LLM is fully GPU-offloaded, so the CPU is
+REM  free and runs small.en fine. (Alternative: VL-3B + GPU Whisper — edit -Size 3b below and
+REM  set WHISPER_DEVICE=cuda. Weaker vision, faster STT.)
+REM
+REM  ONE-TIME PREREQS:
+REM    - Docker Desktop running; turboquant binary built once (build-turboquant.ps1)
+REM    - VL model + mmproj in C:\models  (already present: Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf
+REM      + mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf; else see llm-test\download-vision.ps1)
+REM    - Piper voice in C:\models\piper  (see start_discord.bat)
+REM    - Ollama with nomic-embed-text
+REM    - .env filled in: DISCORD_BOT_TOKEN, TWITCH_CHANNEL, TWITCH_CLIENT_ID/SECRET
+REM
+REM  SCREEN + GAME AUDIO come from the DESKTOP (that's where the game/stream is), NOT this
+REM  laptop. On the DESKTOP, run the senses companion in the repo venv:
+REM      python tools\desktop_senses.py
+REM  It captures the desktop's screen + game-audio loopback and serves them on :8200. Set
+REM  DESKTOP_IP below to the desktop's LAN IP (the companion prints it on start). On the
+REM  desktop: set MIRA_GAME_AUDIO_DEVICE (find it with `python tools\check_capture.py devices`),
+REM  use headphones (so game audio doesn't bleed into your mic), and open TCP 8200 inbound.
+REM  Twitch chat needs nothing extra here — the laptop reads Twitch's API directly.
+REM
+REM  After it starts: open your OBS Browser Source on the avatar port, then say "mira join"
+REM  in the Discord VC. Say "mira host"/"mira let me talk" to hand the floor back and forth.
+REM ============================================================================
 cd /d "%~dp0"
 
-REM EDIT each session: the LAPTOP's current LAN IP (run-mira-vision.ps1 prints it; DHCP).
-set BRAIN_IP=192.168.12.116
+REM EDIT each session: the DESKTOP's current LAN IP (desktop_senses.py prints it; DHCP).
+REM This is where Mira pulls the screen frames + transcribed game dialogue from.
+set DESKTOP_IP=192.168.12.151
 
-echo [1/2] Starting GPT-SoVITS server (its own window)...
-start "Mira SoVITS Server" "%~dp0start_sovits_server.bat"
+REM --- 1. Local BRAIN + EYES: Qwen2.5-VL-7B on :8080 --------------------------
+REM run-mira-vision.ps1 auto-detects this no-D: laptop (C:\models, CUDA 12.8 image), loads the
+REM model + mmproj with q8_0 KV (turbo KV shreds image tokens), and polls /health.
+echo [1/2] Bringing up the local vision brain (Qwen2.5-VL-7B, Docker)...
+powershell -ExecutionPolicy Bypass -File "%~dp0llm-test\run-mira-vision.ps1" -Size 7b -CtxSize 16384
 
-echo       Waiting for GPT-SoVITS to load models (~30-60s on the GTX 1660)...
-set /a _tries=0
-:waitloop
-REM curl exits 0 as soon as the server answers ANY HTTP response = port bound = models loaded.
-curl.exe -s -m 3 -o nul "http://127.0.0.1:9880/tts?text=x&text_lang=en&ref_audio_path=x&prompt_lang=en" 2>nul
-if not errorlevel 1 goto ready
-set /a _tries+=1
-if %_tries% geq 40 (
-    echo       WARNING: GPT-SoVITS still not responding after ~120s. Check its window.
-    echo       Starting Mira anyway -- if her voice fails, fix the server and restart.
-    goto launch
+echo       Checking brain health on :8080 ...
+curl.exe -s -m 5 http://localhost:8080/health | findstr /i "ok" >nul
+if errorlevel 1 (
+  echo.
+  echo [stream] Vision brain is not healthy on :8080.
+  echo   - Is Docker Desktop running?  Try:  docker logs llama-turbo
+  echo   - If it OOMed on the 8 GB GPU, try the 3B:  powershell -File llm-test\run-mira-vision.ps1 -Size 3b
+  echo.
+  pause
+  exit /b 1
 )
-timeout /t 3 /nobreak >nul
-goto waitloop
+echo       Brain + vision OK.
 
-:ready
-echo       GPT-SoVITS is up.
+REM --- 2. Memory embeddings: local Ollama nomic-embed-text -------------------
+ollama list | findstr /i "nomic-embed-text" >nul || ollama pull nomic-embed-text
 
-:launch
 echo [2/2] Starting Mira in STREAM mode (Discord VC + Twitch + host + vision + game audio)...
-call .\.venv\Scripts\activate
+call "%~dp0.venv\Scripts\activate"
 
-REM Chat brain AND eyes -> the LAPTOP's llama.cpp server, which in stream mode runs Qwen2.5-VL
-REM (run-mira-vision.ps1) as both. Both endpoints follow the single BRAIN_IP above.
-REM The MODEL names (MIRA_MODEL / MIRA_VISION_MODEL = the GGUF the server serves) come from
-REM .env, so there's one place to keep them in sync with /v1/models.
-set OLLAMA_BASE_URL=http://%BRAIN_IP%:8080/v1
-set MIRA_VISION_BASE_URL=http://%BRAIN_IP%:8080/v1
-
-REM Memory embeddings -> THIS desktop's own Ollama nomic-embed-text (:11434), NOT the laptop.
+REM --- Everything points at THIS box ----------------------------------------
+REM Chat brain AND vision both hit the one local VL server. llama-server serves whatever GGUF
+REM is loaded regardless of the model name, so MIRA_MODEL=turbo is fine; vision works via the
+REM image_url content + the loaded --mmproj.
+set OLLAMA_BASE_URL=http://localhost:8080/v1
+set MIRA_VISION_BASE_URL=http://localhost:8080/v1
 set MIRA_EMBED_BASE_URL=http://localhost:11434/v1
+set MIRA_MODEL=turbo
+set MIRA_VISION_MODEL=qwen2.5-vl
 set MIRA_NO_THINK=1
-REM Match the scribe's note-chunking budget to the VL server's served context (run-mira-vision.ps1 -c 16384).
+REM Match the scribe's note-chunking budget to the VL server's served context (-CtxSize 16384).
 set MIRA_NOTES_CTX=16384
 
-REM Voice: GPT-SoVITS (started above). Fall back any time with: set MIRA_TTS=kokoro
-set MIRA_TTS=gptsovits
+REM --- Senses come from the DESKTOP companion (tools\desktop_senses.py on :8200) ---
+REM Vision pulls SCREEN FRAMES from the desktop (her local VL still does the captioning), and
+REM game audio pulls TRANSCRIBED dialogue lines (the desktop runs that Whisper). Unset either
+REM to fall back to LOCAL capture on this laptop.
+set MIRA_VISION_FRAME_URL=http://%DESKTOP_IP%:8200/frame
+set MIRA_GAME_AUDIO_URL=http://%DESKTOP_IP%:8200/game-audio
 
-REM STT on the desktop GPU. GTX 1660 / Turing has a BROKEN fp16 path, so use int8_float16.
-set WHISPER_DEVICE=cuda
+REM --- TTS: Piper (+ RVC) — same as start_discord.bat -----------------------
+set MIRA_TTS=piper
+set MIRA_PIPER_MODEL=C:\models\piper\en_US-hfc_female-medium.onnx
+set USE_RVC=1
+set MIRA_RVC_MODEL=C:\models\rvc_models\mira.pth
+set MIRA_RVC_INDEX=C:\models\rvc_models\mira.index
+set MIRA_RVC_PYTHON=%~dp0.venv-rvc\Scripts\python.exe
+
+REM --- STT: Whisper on the CPU (GPU is full with the 7B vision model) --------
+REM This laptop Whisper now ONLY handles YOUR mic (your Discord voice) — the game-audio STT
+REM runs on the desktop companion. int8 on the CPU is plenty for one mic stream, and the CPU is
+REM otherwise idle (LLM is on the GPU). For VL-3B + GPU mic STT: WHISPER_DEVICE=cuda, float16.
+set WHISPER_DEVICE=cpu
 set WHISPER_MODEL_SIZE=small.en
-set WHISPER_COMPUTE_TYPE=int8_float16
+set WHISPER_COMPUTE_TYPE=int8
 
-python main.py --discord --twitch --host --vision --game-audio
+REM --- Run Mira: full stream loadout ----------------------------------------
+python "%~dp0main.py" --discord --twitch --host --vision --game-audio
 
 endlocal

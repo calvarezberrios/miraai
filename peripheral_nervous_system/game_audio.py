@@ -77,6 +77,7 @@ class GameAudio:
         self._lines = deque()                    # (timestamp, text) recently heard
         self._last_text = ""
         self._worker: Optional[threading.Thread] = None
+        self._remote_url = ""                    # set when pulling from the desktop senses companion
         # converse mode
         self._mode = "ambient"                   # "ambient" (overhear) | "converse" (reply to it)
         self._on_utterance = None                # callback(text) for each finalized utterance
@@ -86,6 +87,12 @@ class GameAudio:
 
     # ---------------- lifecycle ----------------
     def start(self) -> bool:
+        # REMOTE source: when Mira's on the laptop but the game runs on the desktop, the desktop
+        # senses companion (tools/desktop_senses.py) captures AND transcribes the game audio and
+        # serves finalized dialogue lines. We just poll them — no local capture or Whisper here.
+        remote = os.environ.get("MIRA_GAME_AUDIO_URL", "").strip()
+        if remote:
+            return self._start_remote(remote)
         try:
             import sounddevice as sd
             import numpy as np
@@ -126,6 +133,60 @@ class GameAudio:
                 pass
         if self._worker is not None:
             self._worker.join(timeout=3)
+
+    # ---------------- remote source (desktop senses companion) ----------------
+    def _start_remote(self, url: str) -> bool:
+        """Pull finalized game-audio dialogue lines from the desktop companion over the LAN and
+        route them like locally-heard lines: ambient -> summary() context, converse -> on_utterance.
+        Uses ONLY stdlib here (no sounddevice/Whisper) since the desktop already did the STT."""
+        self._remote_url = url.rstrip("/") + ("/game-audio" if not url.rstrip("/").endswith("game-audio") else "")
+        self._running = True
+        self._worker = threading.Thread(target=self._remote_loop, name="game-audio-remote", daemon=True)
+        self._worker.start()
+        print(f"[game-audio] pulling transcribed game dialogue from the desktop companion: "
+              f"{self._remote_url}  (tagged 'Game', never confused with you).")
+        return True
+
+    def _remote_loop(self):
+        import json
+        import urllib.request
+        seq = 0
+        warned = False
+        # Don't replay backlog: jump to the companion's current head on first contact.
+        try:
+            with urllib.request.urlopen(self._remote_url + "?since=0", timeout=5) as r:
+                seq = int(json.loads(r.read()).get("last", 0))
+        except Exception:
+            pass
+        while self._running:
+            time.sleep(CADENCE_SEC if self._mode != "converse" else CONV_TICK_SEC * 4)
+            if not self._running:
+                break
+            try:
+                with urllib.request.urlopen(f"{self._remote_url}?since={seq}", timeout=5) as r:
+                    data = json.loads(r.read())
+                warned = False
+            except Exception as e:
+                if not warned:
+                    print(f"[game-audio] desktop companion unreachable ({e}); is it running + firewall open?")
+                    warned = True
+                continue
+            seq = int(data.get("last", seq))
+            for item in data.get("lines", []):
+                text = (item.get("text") or "").strip()
+                if not text:
+                    continue
+                if self._mode == "converse":
+                    if text != self._last_conv:
+                        self._last_conv = text
+                        if self._on_utterance is not None:
+                            self._on_utterance(text)
+                else:
+                    self._last_text = text
+                    with self._lock:
+                        self._lines.append((time.time(), text))
+                        while len(self._lines) > MAX_LINES:
+                            self._lines.popleft()
 
     def resolve_device(self):
         """Pick what to capture and HOW. Returns (index, channels, use_loopback).

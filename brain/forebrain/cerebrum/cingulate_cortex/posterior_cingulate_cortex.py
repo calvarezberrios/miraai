@@ -510,11 +510,46 @@ def _emit(text: str, *, user_text: Optional[str], source: str) -> None:
     """Speak a line through the foreground's serialized speak sequence."""
     if _speak is None or not text:
         return
+    # Anti-parrot guard: a small brain will sometimes regurgitate her OWN last line as a
+    # "spontaneous" chime-in or host patter (especially host_patter, which is fed the recent
+    # history that ends with her last reply). Drop it so she never repeats herself back-to-back
+    # — model-agnostic backstop on top of the prompt-level "say something new" instruction.
+    if _too_similar(_norm(text), _norm(_last_spoken_line())):
+        _dbg(f"emit dropped (repeats last spoken line): {text!r}")
+        return
     try:
         _speak(text, user_text=user_text, channel=_last_channel, source=source)
     except Exception as e:
         print(f"[subconscious] speak failed: {e}")
     touch()
+
+
+def _last_spoken_line() -> str:
+    """The last thing she actually SAID — her most recent assistant turn in working memory
+    (a reply, chime-in, or prior patter; speak_reply records all of them). Used to stop a
+    weak model from parroting her own last line back."""
+    history, _seq = thalamus.snapshot()
+    for m in reversed(history):
+        if m.get("role") == "assistant":
+            return (m.get("content") or "").strip()
+    return ""
+
+
+def _too_similar(a: str, b: str) -> bool:
+    """True if two normalized lines are effectively the same utterance — exact match, one a
+    near-prefix of the other, or heavy word overlap — i.e. she'd just be repeating herself."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.startswith(b) or b.startswith(a):
+        shorter, longer = sorted((a, b), key=len)
+        if len(shorter) >= 0.7 * len(longer):
+            return True
+    ta, tb = set(a.split()), set(b.split())
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / max(len(ta), len(tb)) >= 0.85
 
 
 def _last_user_text(history: List[dict]) -> str:

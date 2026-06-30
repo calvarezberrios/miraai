@@ -1,3 +1,75 @@
+# Mira setup
+
+> **★ ALL-ON-THE-LAPTOP as of 2026-06-29 (branch `laptop_run`).** Everything runs on this
+> one laptop (RTX 5050, 8 GB) — no second machine, no LAN. Launch it all with
+> **`start_discord.bat`**.
+>
+> ```
+> Laptop (RTX 5050 / 8 GB)  —  one box, one click
+>   BRAIN : Qwen3-4B turbo (llama.cpp in Docker)   :8080   ~3.1 GB VRAM
+>   STT   : Whisper small.en  (CUDA, float16)              ~2 GB VRAM
+>   TTS   : Piper (+ optional RVC -> Mira's timbre)        CPU / light
+>   MEMORY: Ollama nomic-embed-text                        :11434
+>   Mira  : Discord voice + HOST autonomy                  python main.py --discord --host
+> ```
+>
+> - **Why 4B, not 8B:** the brain and Whisper share the single 8 GB GPU. The 8B turbo alone
+>   eats ~7.5 GB (no room for GPU STT). The 4B keeps the same Qwen3 turbo pipeline + prompt
+>   tuning at ~3.1 GB (16k ctx), leaving ~5 GB for Whisper. Smaller model = a little less
+>   personality depth — the accepted tradeoff for running everything on one box.
+> - **Run it:** `start_discord.bat`. It (1) brings up the 4B brain in Docker via
+>   `llm-test/run-mira-small.ps1 -Size 4b -CtxSize 16384` and health-checks `:8080`,
+>   (2) ensures Ollama has `nomic-embed-text`, (3) points everything at `localhost`, sets
+>   `MIRA_TTS=piper`, GPU Whisper, then (4) runs `python main.py --discord --host`.
+> - **HOST in Discord:** `--host` makes her fill lulls / host the voice channel (works in plain
+>   Discord now, not just stream mode). Live toggles, spoken or typed in Discord:
+>   `mira host` / `mira take over` hands her the floor, `mira let me talk` / `mira quiet`
+>   takes it back.
+> - **Full stream mode (vision + Twitch + game audio):** run **`start_stream_servers.bat`**
+>   instead. It swaps the 4B brain for **Qwen2.5-VL-7B** (brain AND eyes, ~6.9 GB VRAM via
+>   `run-mira-vision.ps1`), so Whisper moves to the **CPU** (the GPU is full; the CPU is idle
+>   since the LLM is fully offloaded). Adds `--twitch --vision --game-audio`.
+>
+>   **Senses live on the DESKTOP, not the laptop.** When you stream on the desktop but Mira runs
+>   on the laptop, her local `--vision`/`--game-audio` would capture the *laptop* (blank screen,
+>   silence). A companion bridges them over the LAN — `tools/desktop_senses.py`, launched by
+>   `start_desktop_senses.bat`:
+>   ```
+>   DESKTOP (the stream)                           LAPTOP (Mira)
+>     start_desktop_senses.bat                        start_stream_servers.bat
+>       screen     -> :8200/frame ......LAN.......> --vision  (laptop VL captions the frame)
+>       game audio -> Whisper -> :8200/game-audio .> --game-audio (ingests dialogue text)
+>                                                    --twitch reads Twitch's API directly
+>   ```
+>   - On the **desktop**: run `start_desktop_senses.bat` (captures its screen + game-audio
+>     loopback, transcribes the audio THERE, serves both on `:8200`). Set `MIRA_GAME_AUDIO_DEVICE`
+>     in `.env` (find it: `python tools\check_capture.py devices`), use headphones (so game audio
+>     doesn't bleed into the mic), and open TCP 8200 inbound. It prints the desktop's LAN IP.
+>   - On the **laptop**: set `DESKTOP_IP=<that IP>` at the top of `start_stream_servers.bat`
+>     (it wires `MIRA_VISION_FRAME_URL` / `MIRA_GAME_AUDIO_URL` to the companion). Unset those two
+>     to fall back to capturing this laptop instead. Twitch chat needs nothing extra — the laptop
+>     reads it directly. Needs `mss` + `pillow` (installed both sides).
+>   - **Full desktop walkthrough:** see **`DESKTOP_SENSES_SETUP.md`** (deps, picking the
+>     game-audio device, firewall, running it, verifying the link, config + troubleshooting).
+> - **Solo hosting with no inputs:** `--host` no longer needs chat/vision/game audio to talk —
+>   she fills lulls from her own head (opinions, callbacks to memory, bits, fresh topics), one
+>   rotating "move" per beat, and never parrots her own last line.
+> - **Voice (Piper → RVC):** Piper alone gives a clean English-female voice. To get Mira's
+>   cloned timbre, drop `mira.pth` / `mira.index` in `C:\models\rvc_models\` and build the
+>   `.venv-rvc` runtime (`py -3.11 -m venv .venv-rvc && .venv-rvc\Scripts\pip install
+>   rvc-python`). Until then it falls back to raw Piper automatically (no error). The RVC
+>   model isn't in git — copy it from the desktop.
+> - **One-time prereqs:** Docker Desktop + WSL2 + GPU passthrough, the turboquant binary built
+>   once (`llm-test/build-turboquant.ps1`), the 4B model
+>   (`llm-test/download-small.ps1 -Size 4b -ModelDir C:\models`), the Piper voice in
+>   `C:\models\piper\`, Ollama with `nomic-embed-text`, py-cord voice build + ffmpeg, and
+>   `.env` with `DISCORD_BOT_TOKEN`.
+>
+> The sections below describe earlier **split** layouts (brain and Mira on separate machines).
+> Keep them for reference if you ever go back to two boxes.
+
+---
+
 # Split setup (brain ⇄ Mira over the LAN)
 
 > **⚠ REVERSED as of 2026-06-27.** The turbo LLM now runs on the **laptop** (RTX 5050,

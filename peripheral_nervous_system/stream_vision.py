@@ -70,12 +70,18 @@ class StreamVision:
             self._thread.join(timeout=3)
 
     def _init_capture(self) -> bool:
-        """Prefer mss (fast); fall back to PIL.ImageGrab. Both need Pillow for resize/encode."""
+        """Pick the frame SOURCE. If MIRA_VISION_FRAME_URL is set, pull frames from the desktop
+        senses companion over the LAN (Mira's on a different machine than the screen). Otherwise
+        grab a LOCAL monitor: prefer mss (fast), fall back to PIL.ImageGrab. Either way the frame
+        is a PIL.Image that the rest of the pipeline downscales + captions on the local VL."""
         try:
             from PIL import Image  # noqa: F401
         except Exception:
             print("[vision] disabled — needs Pillow:  python -m pip install pillow mss")
             return False
+        remote = os.environ.get("MIRA_VISION_FRAME_URL", "").strip()
+        if remote:
+            return self._init_remote_capture(remote)
         try:
             import mss
             from PIL import Image
@@ -99,6 +105,25 @@ class StreamVision:
                 print(f"[vision] disabled — no screen capture backend ({e}); "
                       f"python -m pip install mss pillow")
                 return False
+
+    def _init_remote_capture(self, url: str) -> bool:
+        """Frame source = the desktop senses companion (tools/desktop_senses.py serving /frame).
+        Mira runs on the laptop; the screen lives on the desktop, so we fetch the JPEG over the
+        LAN instead of grabbing a local monitor. Captioning still happens on the local VL."""
+        try:
+            import urllib.request
+            from PIL import Image
+        except Exception as e:
+            print(f"[vision] disabled — remote frame needs Pillow ({e})")
+            return False
+
+        def grab():
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = r.read()
+            return Image.open(io.BytesIO(data)).convert("RGB")
+        self._grab = grab
+        print(f"[vision] pulling screen frames from the desktop senses companion: {url}")
+        return True
 
     def _pick_monitor(self, sct):
         """Choose which monitor to watch. MIRA_VISION_MONITOR=<index> forces one; otherwise
