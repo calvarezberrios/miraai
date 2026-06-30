@@ -42,11 +42,18 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-# Load .env the same way the rest of the app does, if present.
+# Load .env the same way the rest of the app does, if present. Two gotchas handled here:
+#   1) run as `python tools/desktop_senses.py`, sys.path[0] is tools/, NOT the project root,
+#      so the root-level env_loader isn't importable until we add the root to sys.path.
+#   2) env_loader does NOT load on import — it only defines load_env() — so call it explicitly,
+#      BEFORE reading os.environ below (MIRA_GAME_AUDIO_DEVICE, MIRA_VISION_MONITOR, MIRA_GAME_*).
 try:
-    import env_loader  # noqa: F401  (auto-loads .env into os.environ on import)
-except Exception:
-    pass
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from env_loader import load_env
+    load_env()
+except Exception as _e:
+    print(f"[senses] note: couldn't load .env ({_e}); using process env + defaults")
 
 PORT = int(os.environ.get("MIRA_SENSES_PORT", "8200"))
 MAX_DIM = int(os.environ.get("MIRA_SENSES_MAX_DIM", "1024"))
@@ -57,6 +64,31 @@ END_SILENCE = float(os.environ.get("MIRA_GAME_END_SILENCE", "1.0"))
 MIN_SPOKEN = float(os.environ.get("MIRA_GAME_MIN_SPOKEN", "0.4"))
 MAX_SEC = float(os.environ.get("MIRA_GAME_MAX_SEC", "30"))
 SILENCE_RMS = float(os.environ.get("MIRA_GAME_SILENCE_RMS", "0.006"))  # below this = "quiet"
+
+
+def _enable_bundled_cuda_dlls() -> None:
+    """faster-whisper's CUDA runtime (cuBLAS/cuDNN) ships as pip wheels under
+    site-packages/nvidia/*/bin, but Windows won't find those DLLs at inference time unless the
+    dirs are on the DLL search path — otherwise CTranslate2 dies mid-transcribe with
+    'cublas64_12.dll is not found or cannot be loaded'. Add them here, before Whisper loads.
+    No-op off-Windows or when the wheels aren't installed (then CUDA must be on the system PATH)."""
+    try:
+        import importlib.util
+        import glob
+        spec = importlib.util.find_spec("nvidia")
+        if not spec or not spec.submodule_search_locations:
+            return
+        for base in spec.submodule_search_locations:
+            for bindir in glob.glob(os.path.join(base, "*", "bin")):
+                if not os.path.isdir(bindir):
+                    continue
+                try:
+                    os.add_dll_directory(bindir)        # Python 3.8+ DLL search (Windows)
+                except (OSError, AttributeError):
+                    pass
+                os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+    except Exception as e:
+        print(f"[senses/audio] note: couldn't register bundled CUDA dirs ({e})")
 
 
 # ===========================================================================
@@ -146,6 +178,7 @@ class AudioSense:
         self._seq = 0
 
     def start(self) -> bool:
+        _enable_bundled_cuda_dlls()   # put cuBLAS/cuDNN on the DLL path before CTranslate2 loads
         try:
             import sounddevice as sd
             import numpy as np

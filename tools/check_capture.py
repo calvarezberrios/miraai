@@ -249,6 +249,12 @@ HELPERS = {"devices": list_devices, "monitors": list_monitors}
 
 
 def main(argv) -> int:
+    # The listings print a few non-ASCII glyphs (★, →); the default Windows console is cp1252
+    # and would crash on them. Force UTF-8 with a safe fallback so the checks always run.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     load_env()
     requested = [a.lower() for a in argv]
     # A helper like 'devices' just prints and exits (don't run the full suite alongside it).
