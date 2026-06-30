@@ -31,9 +31,18 @@ def new_session() -> Dict:
     # de-dup if two land in the same second
     if os.path.exists(_path(sid)):
         sid += f"-{int(time.time() * 1000) % 1000:03d}"
-    s = {"id": sid, "title": "New chat", "created": time.time(), "messages": []}
+    s = {"id": sid, "title": "New chat", "created": time.time(), "tokens": 0, "messages": []}
     _write(s)
     return s
+
+
+def set_tokens(session_id: str, n: int) -> None:
+    """Remember this session's last context size, so the meter is right when it's reopened."""
+    s = load(session_id)
+    if s is None:
+        return
+    s["tokens"] = int(n)
+    _write(s)
 
 
 def _write(s: Dict) -> None:

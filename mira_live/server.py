@@ -73,12 +73,14 @@ async def ws_chat(ws: WebSocket):
     try:
         while True:
             data = await ws.receive_json()
-            session_id = data.get("session_id")
             text = (data.get("text") or "").strip()
-            if not session_id or not text:
+            if not text:
                 continue
 
-            s = sessions.load(session_id)
+            # Lazy session creation: a new chat has no id until its FIRST message, so refresh /
+            # New chat never leave empty sessions behind. Create one here on first send.
+            session_id = data.get("session_id")
+            s = sessions.load(session_id) if session_id else None
             if s is None:
                 s = sessions.new_session()
                 session_id = s["id"]
@@ -95,6 +97,7 @@ async def ws_chat(ws: WebSocket):
                     await ws.send_json({"type": "token", "text": payload})
                 elif kind == "usage":
                     total = (payload or {}).get("total_tokens", 0)
+                    sessions.set_tokens(session_id, total)
                     await ws.send_json({"type": "usage", "total_tokens": total,
                                         "limit": config.CONTEXT_LIMIT})
                 elif kind == "error":

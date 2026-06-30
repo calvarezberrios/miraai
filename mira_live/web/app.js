@@ -54,6 +54,8 @@ function handleServer(msg) {
 
 // ---------- messages ----------
 function addMessage(who, text) {
+  const hint = messagesEl.querySelector(".empty-hint");
+  if (hint) hint.remove();
   const el = document.createElement("div");
   el.className = `msg ${who}`;
   const label = document.createElement("div");
@@ -84,9 +86,10 @@ function setContext(total, limit) {
 async function send() {
   const text = inputEl.value.trim();
   if (!text || state.streaming) return;
-  if (!state.sessionId) await newChat();
   addMessage("user", text);
   inputEl.value = ""; autoGrow();
+  // session_id may be null for a brand-new chat; the server creates it on first message
+  // and tells us its id via a {type:"session"} reply.
   state.ws.send(JSON.stringify({ session_id: state.sessionId, text }));
 }
 
@@ -100,15 +103,18 @@ function autoGrow() { inputEl.style.height = "auto"; inputEl.style.height = Math
 // ---------- sessions ----------
 $("new-chat").addEventListener("click", newChat);
 
-async function newChat() {
-  const s = await (await fetch("/api/sessions", { method: "POST" })).json();
-  state.sessionId = s.id;
-  messagesEl.innerHTML = "";
+function newChat() {
+  // No POST — the session is created on the first message (avoids empty sessions).
+  state.sessionId = null;
   chatTitleEl.textContent = "New chat";
+  showEmptyState();
   setContext(0, state.contextLimit);
-  await refreshSessions();
   highlightActive();
   inputEl.focus();
+}
+
+function showEmptyState() {
+  messagesEl.innerHTML = `<div class="empty-hint">Start a new chat —<br>say something to Mira below.</div>`;
 }
 
 async function refreshSessions() {
@@ -155,6 +161,8 @@ async function openSession(id) {
   for (const m of s.messages) {
     if (m.role === "user" || m.role === "assistant") addMessage(m.role === "user" ? "user" : "mira", m.content);
   }
+  if (!s.messages || !s.messages.length) showEmptyState();
+  setContext(s.tokens || 0, state.contextLimit);   // per-chat context, restored from disk
   highlightActive();
 }
 
@@ -174,7 +182,13 @@ async function init() {
     setContext(0, state.contextLimit);
   } catch (e) { /* server warming */ }
   connect();
+  // Don't create a session on load. Open the most recent chat, or show an empty state.
+  const list = await (await fetch("/api/sessions")).json();
+  if (list.length) {
+    await openSession(list[0].id);   // list is newest-first
+  } else {
+    showEmptyState();
+  }
   await refreshSessions();
-  await newChat();
 }
 init();
