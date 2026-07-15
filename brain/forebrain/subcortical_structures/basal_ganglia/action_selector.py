@@ -26,8 +26,12 @@ import time
 from dataclasses import dataclass
 
 # --- who she answers to by name ----------------------------------------------
-NAME = "Mira"
-ALIASES = ()                  # extra names she answers to, e.g. ("mir", "foxy")
+# Overridable so a rename is one env var. "mira" stays an alias so old wake words /
+# commands keep working; the shiori mishears cover what Whisper tends to produce.
+import os as _os
+NAME = _os.environ.get("MIRA_NAME", "Shiori").strip() or "Shiori"
+ALIASES = tuple(a.strip() for a in _os.environ.get(
+    "MIRA_NAME_ALIASES", "mira,shori,siori,sheori").split(",") if a.strip())
 
 # --- conversation continuity --------------------------------------------------
 ACTIVE_WINDOW_SEC = 300.0     # after she speaks, she stays "in the conversation"

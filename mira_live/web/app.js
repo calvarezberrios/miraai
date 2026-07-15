@@ -10,6 +10,7 @@ const sessionListEl = $("session-list");
 const chatTitleEl = $("chat-title");
 
 let state = {
+  name: "Shiori",
   sessionId: null,
   ws: null,
   streaming: false,
@@ -31,7 +32,7 @@ function handleServer(msg) {
   switch (msg.type) {
     case "session": state.sessionId = msg.id; break;
     case "start":
-      state.streaming = true; sendBtn.disabled = true; setStatus("Mira is typing…");
+      state.streaming = true; sendBtn.disabled = true; setStatus(state.name + " is typing…");
       state.curMiraEl = addMessage("mira", "");
       break;
     case "token":
@@ -60,7 +61,7 @@ function addMessage(who, text) {
   el.className = `msg ${who}`;
   const label = document.createElement("div");
   label.className = "who";
-  label.textContent = who === "user" ? "You" : "Mira";
+  label.textContent = who === "user" ? "You" : state.name;
   const body = document.createElement("div");
   body.className = "body";
   body.textContent = text;
@@ -114,7 +115,7 @@ function newChat() {
 }
 
 function showEmptyState() {
-  messagesEl.innerHTML = `<div class="empty-hint">Start a new chat —<br>say something to Mira below.</div>`;
+  messagesEl.innerHTML = `<div class="empty-hint">Start a new chat —<br>say something to ${state.name} below.</div>`;
 }
 
 async function refreshSessions() {
@@ -178,6 +179,10 @@ async function init() {
   try {
     const meta = await (await fetch("/api/meta")).json();
     state.contextLimit = meta.context_limit || 8192;
+    if (meta.name) state.name = meta.name;
+    document.title = state.name + " Live";
+    document.querySelector(".brand span").textContent = state.name + " Live";
+    inputEl.placeholder = "Talk to " + state.name + "…  (Enter to send)";
     $("model-tag").textContent = "model: " + (meta.model || "—");
     setContext(0, state.contextLimit);
   } catch (e) { /* server warming */ }

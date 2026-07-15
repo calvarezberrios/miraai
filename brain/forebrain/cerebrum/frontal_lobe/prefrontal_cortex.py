@@ -155,7 +155,7 @@ def _identity_block(speaker: str, speaker_known: bool) -> str:
         "\n\nWho you're talking to:\n"
         "- In the conversation, each line said to you is prefixed with the speaker's name, like "
         "\"" + speaker + ": ...\". These names are how you tell people apart. NEVER prefix your "
-        "own replies with a name or \"Mira:\" — just say your words.\n"
+        "own replies with a name label (your own name or anyone else's) — just say your words.\n"
     )
     if speaker_known:
         block += (

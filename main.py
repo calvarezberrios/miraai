@@ -39,7 +39,7 @@ from brain.forebrain.subcortical_structures.limbic_system.hippocampus import (
     recall_document, recall_full_documents, remember_document, list_documents, forget_document,
 )
 from brain.forebrain.subcortical_structures.basal_ganglia.action_selector import (
-    should_respond, mark_engaged,
+    should_respond, mark_engaged, NAME as HER_NAME, ALIASES as HER_ALIASES,
 )
 from peripheral_nervous_system.io_adapter import InputEvent, PARTIAL, INTERRUPT, PREFILL
 
@@ -155,7 +155,7 @@ if args.discord and args.twitch:
     _discord = DiscordAdapter()
     _twitch = TwitchAdapter(chat_only=True)   # Discord owns the mic + all voice output
     adapter = CompositeAdapter([_discord, _twitch], voice=_discord)
-    print("Mira is coming up in STREAM mode — Discord voice + Twitch chat, talking in the VC.\n")
+    print(f"{HER_NAME} is coming up in STREAM mode — Discord voice + Twitch chat, talking in the VC.\n")
 elif args.discord:
     from peripheral_nervous_system.discord_adapter import DiscordAdapter
     adapter = DiscordAdapter()
@@ -163,11 +163,11 @@ elif args.discord:
 elif args.twitch:
     from peripheral_nervous_system.twitch_adapter import TwitchAdapter
     adapter = TwitchAdapter()
-    print("Mira is coming up in Twitch mode — reading chat, talking back by voice.\n")
+    print(f"{HER_NAME} is coming up in Twitch mode — reading chat, talking back by voice.\n")
 else:
     from peripheral_nervous_system.local_adapter import LocalAdapter
     adapter = LocalAdapter()
-    print("Mira is starting up — warming the brain, voice, and ears. Please wait to talk...\n")
+    print(f"{HER_NAME} is starting up — warming the brain, voice, and ears. Please wait to talk...\n")
 
 # Stream status (live/offline, viewers, game) — only meaningful when reading Twitch.
 stream_status = None
@@ -248,15 +248,33 @@ def _is_streamer_channel(event):
     ch = str(getattr(event, "channel", "") or "")
     return ch.startswith("discord") or ch == "local"
 
-# Phrases that hand the floor to her (host more) or take it back (you talk more).
-_HOST_ON_PHRASES = (
-    "mira host", "mira start hosting", "mira take over", "mira you talk", "mira take the mic",
-    "mira keep it lively", "mira hosting on", "mira host mode on", "mira be chatty", "mira go ahead",
+# Spoken commands are "<her name> <command>". Built from her configurable name + aliases
+# (action_selector.NAME/ALIASES, env MIRA_NAME / MIRA_NAME_ALIASES) so a rename — e.g. Mira ->
+# Shiori — keeps every command working, including via the old name and common STT mishears.
+_CMD_NAMES = tuple(dict.fromkeys(
+    n.lower() for n in (HER_NAME, *HER_ALIASES) if n and n.strip()))
+
+
+def _strip_name(c):
+    """If the normalized command starts with one of her names, return the remainder
+    ('shiori take over' -> 'take over'); otherwise None."""
+    for n in _CMD_NAMES:
+        if c == n:
+            return ""
+        if c.startswith(n + " "):
+            return c[len(n) + 1:]
+    return None
+
+
+# Command suffixes that hand the floor to her (host more) or take it back (you talk more).
+_HOST_ON_CMDS = (
+    "host", "start hosting", "take over", "you talk", "take the mic",
+    "keep it lively", "hosting on", "host mode on", "be chatty", "go ahead",
 )
-_HOST_OFF_PHRASES = (
-    "mira quiet", "mira be quiet", "mira let me talk", "mira stop hosting", "mira ill talk",
-    "mira i'll talk", "mira hosting off", "mira host mode off", "mira hush", "mira stand by",
-    "mira take a backseat", "mira chill",
+_HOST_OFF_CMDS = (
+    "quiet", "be quiet", "let me talk", "stop hosting", "ill talk",
+    "i'll talk", "hosting off", "host mode off", "hush", "stand by",
+    "take a backseat", "chill",
 )
 
 # --- game conversation mode ---------------------------------------------------
@@ -266,10 +284,10 @@ _HOST_OFF_PHRASES = (
 # leaving she stays quiet until you say "mira host" again.
 GAME_MODE = threading.Event()
 GAME_CHARACTER = os.environ.get("MIRA_GAME_CHARACTER", "").strip() or "the game's character"
-_GAME_ON_PHRASES = ("mira play the game", "mira talk to the game", "mira game mode",
-                    "mira start the game", "mira lets play", "mira enter game", "mira play game")
-_GAME_OFF_PHRASES = ("mira stop playing", "mira stop the game", "mira exit game", "mira out of game",
-                     "mira leave the game", "mira end game", "mira done playing", "mira quit game")
+_GAME_ON_CMDS = ("play the game", "talk to the game", "game mode",
+                 "start the game", "lets play", "enter game", "play game")
+_GAME_OFF_CMDS = ("stop playing", "stop the game", "exit game", "out of game",
+                  "leave the game", "end game", "done playing", "quit game")
 
 
 def _maybe_toggle_hosting(event):
@@ -278,11 +296,11 @@ def _maybe_toggle_hosting(event):
     when it consumed the message."""
     if not _is_streamer_channel(event):
         return False
-    c = _norm_cmd(event.text)
-    if not c.startswith("mira"):
+    rest = _strip_name(_norm_cmd(event.text))
+    if rest is None:
         return False
-    want_on = any(c == p or c.startswith(p) for p in _HOST_ON_PHRASES)
-    want_off = any(c == p or c.startswith(p) for p in _HOST_OFF_PHRASES)
+    want_on = any(rest == p or rest.startswith(p) for p in _HOST_ON_CMDS)
+    want_off = any(rest == p or rest.startswith(p) for p in _HOST_OFF_CMDS)
     if not (want_on or want_off):
         return False
     if want_on:
@@ -318,18 +336,18 @@ def _maybe_toggle_game_mode(event):
     global GAME_CHARACTER
     if game_audio is None or not _is_streamer_channel(event):
         return False
-    c = _norm_cmd(event.text)
-    if not c.startswith("mira"):
+    rest = _strip_name(_norm_cmd(event.text))
+    if rest is None:
         return False
     name, want_on = None, False
-    if c.startswith("mira talk to "):
-        who = c[len("mira talk to "):].strip()
+    if rest.startswith("talk to "):
+        who = rest[len("talk to "):].strip()
         if who and who not in ("the game", "the character", "her", "him", "it", "them"):
             name = who.title()
         want_on = True
-    elif any(c == p or c.startswith(p) for p in _GAME_ON_PHRASES):
+    elif any(rest == p or rest.startswith(p) for p in _GAME_ON_CMDS):
         want_on = True
-    want_off = any(c == p or c.startswith(p) for p in _GAME_OFF_PHRASES)
+    want_off = any(rest == p or rest.startswith(p) for p in _GAME_OFF_CMDS)
     if not (want_on or want_off):
         return False
     chan_key = getattr(event.raw, "id", None)
@@ -337,7 +355,8 @@ def _maybe_toggle_game_mode(event):
     if want_off:
         GAME_MODE.clear()
         game_audio.set_mode("ambient")
-        ack = "Okay, stepping out of the game. Say \"mira host\" when you want me back on stream."
+        ack = (f"Okay, stepping out of the game. Say \"{HER_NAME.lower()} host\" "
+               "when you want me back on stream.")
     else:
         if name:
             GAME_CHARACTER = name
@@ -560,7 +579,7 @@ def _speak_streaming(stream, *, speaker, user_text, source):
     assembled text for memory/logging. Pauses the ears (caller resumes them)."""
     if speaker and user_text is not None:
         print(f"\n{speaker}: {user_text}")
-    tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
+    tag = f"{HER_NAME} ({amygdala.mood})" if source == "reply" else f"{HER_NAME} (chimes in, {amygdala.mood})"
     adapter.pause_input()                             # don't let her hear herself
     parts = []
     gestured = False
@@ -633,7 +652,7 @@ def speak_reply(reply, *, user_text=None, channel="local", interrupting=False,
             else:
                 if speaker and user_text is not None:
                     print(f"\n{speaker}: {user_text}")
-                tag = f"Mira ({amygdala.mood})" if source == "reply" else f"Mira (chimes in, {amygdala.mood})"
+                tag = f"{HER_NAME} ({amygdala.mood})" if source == "reply" else f"{HER_NAME} (chimes in, {amygdala.mood})"
                 print(f"{tag}: {shown}\n")
 
             cerebellum.gesture_for_speech(reply)      # gesture from raw text (action words intact)

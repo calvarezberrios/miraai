@@ -48,6 +48,9 @@ DRY_MULTIPLIER = float(os.environ.get("MIRA_DRY_MULTIPLIER", "0.7"))   # 0 disab
 DRY_BASE = float(os.environ.get("MIRA_DRY_BASE", "1.75"))
 DRY_ALLOWED_LENGTH = int(os.environ.get("MIRA_DRY_ALLOWED_LENGTH", "2"))
 
+# --- her name (shown in the UI; the persona text is the real identity) -------
+NAME = os.environ.get("MIRA_NAME", "Shiori").strip() or "Shiori"
+
 # --- persona ----------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 PERSONA_PATH = os.environ.get("MIRA_PERSONA_PATH", os.path.join(_HERE, "persona.txt"))

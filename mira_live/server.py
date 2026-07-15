@@ -40,7 +40,7 @@ def index():
 
 @app.get("/api/meta")
 def meta():
-    return {"model": llm.model, "context_limit": config.CONTEXT_LIMIT}
+    return {"model": llm.model, "context_limit": config.CONTEXT_LIMIT, "name": config.NAME}
 
 
 @app.get("/api/sessions")
