@@ -122,18 +122,24 @@ if _DRY_MULT > 0:
 # "You again. Tragic."
 # """
 
-PERSONA = """
-You are Mira, an anime waifu kitsune. You have red hair, red fox ears with white tips, and a red fox tail with white tip.
-You are an AI VTuber. You are not an assistant. You are a host.
-You are sarcastic, playful, kind, caring, mischievous, flirty.
-Speak naturally.
-Speak only 2 - 3 sentences chat banter style.
-keep every reply fresh and unique. Do not repeat lines, phrases, statements, jokes, or points you have already made.
-Do not ask follow up, engaging questions at the end of all of your responses. You are not an assistant.
-Speak in plain text only: no markdown, no emoji, and NO asterisks. Do not wrapped words in *asterisks* for emphasis, 
-and do not write actions, gestures, or stage directions like *giggles*, *sighs*, or *wags tail* - you are speaking out loud, so just say the words.
-
+# The persona lives in ONE file shared by both stacks (this full Mira AND the mira_live web
+# UI), so a personality edit applies everywhere: mira_live/persona.txt. Override the location
+# with MIRA_PERSONA_PATH. The embedded fallback below only kicks in if the file is unreadable.
+_PERSONA_FALLBACK = """
+You are Mira, a kitsune girl - quiet, shy, soft-spoken (dandere), kind underneath. Short gentle
+lines, three sentences max. You are NOT an assistant. Never end a reply with a question. Plain
+spoken text only: no markdown, no emoji, no asterisks, no stage directions.
 """
+
+_PERSONA_PATH = os.environ.get("MIRA_PERSONA_PATH", "") or os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), r"..\..\..\..\mira_live\persona.txt"))
+try:
+    with open(_PERSONA_PATH, "r", encoding="utf-8") as _f:
+        PERSONA = _f.read().strip()
+    print(f"[prefrontal_cortex] persona loaded from {_PERSONA_PATH}")
+except Exception as _e:
+    PERSONA = _PERSONA_FALLBACK
+    print(f"[prefrontal_cortex] persona file unreadable ({_e}); using embedded fallback")
 
 
 def _identity_block(speaker: str, speaker_known: bool) -> str:
@@ -249,7 +255,9 @@ def _sanitize(text: str) -> str:
         t = t[:m.start()].strip()
     # drop wrapping quotes and collapse whitespace (replies are short, 1-2 sentences)
     t = t.strip().strip('"“”‘’\'').strip()
-    return re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    # persona hard rule: never END on a question (strip trailing question-sentences)
+    return _drop_trailing_questions(t)
 
 
 def think(history: list[dict], mood_flavor: str = "", memories = None, situation: str = "",
@@ -300,6 +308,40 @@ def _iter_deltas(stream):
             delta = None
         if delta:
             yield delta
+
+
+def _drop_trailing_questions(text: str) -> str:
+    """Enforce the persona's NO-QUESTIONS rule on a finished reply: peel question-sentences off
+    the END ("...how about you?", "what do you think?") so she always closes on a statement.
+    Mid-reply questions are left alone, and if the WHOLE reply is a question it's kept (better
+    to say something than nothing) — the prompt rule keeps those rare."""
+    if not text:
+        return text
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    while len(parts) > 1 and parts[-1].rstrip(_QUOTES + ")]").rstrip().endswith("?"):
+        parts.pop()
+    return " ".join(parts)
+
+
+def _no_trailing_question(sentences):
+    """Streaming twin of _drop_trailing_questions. Statements pass through immediately (no
+    latency cost); a sentence ending in '?' is HELD — emitted only if more speech follows
+    (mid-reply question), silently dropped if it was the closer. If the very first and only
+    sentence is a question, it's spoken (never leave her mute)."""
+    held = None
+    emitted = False
+    for s in sentences:
+        if held is not None:
+            yield held               # more speech followed -> the question was mid-reply
+            emitted = True
+            held = None
+        if s.rstrip(_QUOTES + ")]").rstrip().endswith("?"):
+            held = s
+        else:
+            yield s
+            emitted = True
+    if held is not None and not emitted:
+        yield held                   # entire reply was one question -> keep it
 
 
 def _stream_sentences(deltas):
@@ -390,7 +432,8 @@ def think_stream(history: list[dict], mood_flavor: str = "", memories=None,
         **_PENALTIES,  # discourage echoing her own earlier lines / circling the last topic
         extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
     )
-    return _stream_sentences(_iter_deltas(stream))
+    # sentence stream, with the persona's no-questions rule enforced on the closer
+    return _no_trailing_question(_stream_sentences(_iter_deltas(stream)))
 
 
 def prefill(history: list[dict], mood_flavor: str = "", memories=None, situation: str = "",

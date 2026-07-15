@@ -38,4 +38,16 @@ def clean(text: str) -> str:
     t = re.sub(r"[ \t]{2,}", " ", t)
     t = re.sub(r" *\n *", "\n", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
-    return t.strip()
+    return _drop_trailing_questions(t.strip())
+
+
+def _drop_trailing_questions(text: str) -> str:
+    """Persona hard rule: never END on a question. Peel question-sentences off the end
+    ("...what about you?") so she closes on a statement; mid-reply questions stay, and a
+    reply that is entirely one question is kept rather than silenced."""
+    if not text:
+        return text
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    while len(parts) > 1 and parts[-1].rstrip("\"'“”‘’)]").rstrip().endswith("?"):
+        parts.pop()
+    return " ".join(parts)
