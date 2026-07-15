@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mira</title>
+  <title>Shiori</title>
   <style>
     /* Transparent background — OBS Browser Source captures the page alpha directly, so no
        chroma key is needed (keying green would also key out Mira's green eyes). */
@@ -225,8 +225,9 @@
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
 
-    //log('loading mira.vrm …');
-    loader.load('/mira.vrm', async (gltf) => {
+    // The avatar model. MODEL_URL query param overrides (e.g. ?model=/mira.vrm to flip back).
+    const MODEL_URL = new URLSearchParams(location.search).get('model') || '/shiori.vrm';
+    loader.load(MODEL_URL, async (gltf) => {
       vrm = gltf.userData.vrm;
       VRMUtils.removeUnnecessaryVertices(gltf.scene);
       VRMUtils.combineSkeletons(gltf.scene);
