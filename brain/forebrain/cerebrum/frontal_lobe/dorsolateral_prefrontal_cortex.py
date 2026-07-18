@@ -180,6 +180,9 @@ def intercept(event, *, notify: Callable[[str], None]) -> bool:
         notify(f"[Mira is now taking {kind}{extra}. She'll stay silent and just listen. "
                f"Say 'recap' for a summary; TYPE 'stop taking notes' to finish "
                f"(start/stop are text-only commands).]")
+        print("[notes] recording — each captured line will echo here as "
+              "'[notes HH:MM:SS] Speaker: text'. If nothing echoes while people talk, "
+              "no audio is reaching her (is she in the voice channel?).")
         return True
 
     return False   # not a START and no session -> let normal chat handle it
@@ -261,6 +264,9 @@ def _record(speaker: str, text: str) -> None:
             _file.flush()
         except Exception as e:
             print(f"[notes] write failed: {e}")
+    # Echo every recorded line to the terminal so you can SEE the transcript landing —
+    # a silent console during note-taking looks identical to no audio arriving at all.
+    print(f"[notes {ts.strftime('%H:%M:%S')}] {speaker}: {text}")
 
 
 def _try_register_cast(body: str, speaker: str) -> Optional[str]:
@@ -307,6 +313,12 @@ def _finalize() -> Tuple[Optional[str], Optional[str]]:
     summary = None
     organized = None
     slug = None
+    if not transcript:
+        # Make an empty session LOUD: last time this happened silently and it looked like
+        # notes "just didn't work" — really no audio ever reached the scribe.
+        print("[notes] WARNING: session ended with ZERO recorded lines. No speech reached "
+              "the scribe — check that she was in the Discord voice channel (say the join "
+              "command BEFORE starting notes) and that the mic/STT was live.")
     if transcript:
         transcript_text = _transcript_text(transcript)
         cast_text = _cast_block(cast)
