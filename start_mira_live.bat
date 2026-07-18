@@ -31,7 +31,7 @@ REM --- 2. Web UI ------------------------------------------------------------
 call ".\.venv\Scripts\activate"
 set MIRA_LLM_BASE_URL=http://localhost:1234/v1
 set MIRA_LLM_MODEL=
-set MIRA_CONTEXT_LIMIT=8192
+set MIRA_CONTEXT_LIMIT=16384
 set MIRA_WEB_HOST=0.0.0.0
 set MIRA_WEB_PORT=8900
 python -m mira_live.server

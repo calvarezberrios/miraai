@@ -22,6 +22,10 @@ if not exist "%MODEL%" (
   pause & exit /b 1
 )
 
-echo Starting Hermes-3 on llama.cpp (CUDA, all layers on GPU, 8192 ctx, flash attention)...
-"%LLAMA%" -m "%MODEL%" --host 0.0.0.0 --port 1234 -ngl 99 -c 8192 -fa on --threads-http 4
+REM 16384 ctx (a long session overflowed 8192) with q8_0 KV cache: the quantized KV
+REM keeps 16k at the same VRAM as 8k-f16 was (~5.6 GB) — q8 KV is fine for TEXT models
+REM (it only broke vision image tokens, and there's no vision model here).
+echo Starting Hermes-3 on llama.cpp (CUDA, all layers on GPU, 16384 ctx, flash attention)...
+"%LLAMA%" -m "%MODEL%" --host 0.0.0.0 --port 1234 -ngl 99 -c 16384 -fa on ^
+  --cache-type-k q8_0 --cache-type-v q8_0 --threads-http 4
 endlocal

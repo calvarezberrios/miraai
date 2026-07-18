@@ -65,7 +65,7 @@ set MIRA_EMBED_BASE_URL=http://localhost:11434/v1
 set MIRA_MODEL=hermes-3
 set MIRA_NO_THINK=0
 REM Match the scribe's note-chunking budget to the served context (-c 8192).
-set MIRA_NOTES_CTX=8192
+set MIRA_NOTES_CTX=16384
 
 REM --- GAME AUDIO from the DESKTOP companion (NO vision) ----------------------
 REM The desktop transcribes the game dialogue and serves text on :8200; Mira

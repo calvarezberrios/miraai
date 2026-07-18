@@ -56,7 +56,7 @@ REM Hermes-3 is NOT a reasoning model — no think-block suppression needed.
 set MIRA_NO_THINK=0
 REM Keep the scribe's note-chunking budget in sync with the served context
 REM (start_llm_server.bat -c 8192).
-set MIRA_NOTES_CTX=8192
+set MIRA_NOTES_CTX=16384
 
 REM --- TTS: Piper (+ RVC) -----------------------------------------------------
 set MIRA_TTS=piper
