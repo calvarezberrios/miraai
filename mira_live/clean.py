@@ -38,7 +38,35 @@ def clean(text: str) -> str:
     t = re.sub(r"[ \t]{2,}", " ", t)
     t = re.sub(r" *\n *", "\n", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
-    return _drop_trailing_questions(t.strip())
+    # bare actions first (a trailing one would shield an end-question), then questions
+    return _drop_trailing_questions(_drop_bare_actions(t.strip()))
+
+
+# Bare (asterisk-less) stage directions — "fidgets with hair", "giggles nervously" —
+# survive the *action* stripper above because there are no asterisks left to find.
+# A sentence that STARTS with a third-person action verb and stays short IS an action
+# beat (she's the implied subject); "Looks like ..." is real speech and excluded.
+_ACTION_VERBS = (
+    "giggles", "blushes", "fidgets", "smiles", "laughs", "sighs", "nods", "shrugs",
+    "looks", "glances", "twirls", "wags", "waves", "winks", "bites", "tucks", "brushes",
+    "hides", "covers", "leans", "tilts", "shifts", "stares", "pouts", "mumbles",
+    "whispers", "murmurs", "hums", "taps", "wraps", "hugs", "clutches", "blinks",
+    "gazes", "fiddles", "squirms", "tugs", "pulls", "scratches", "rubs", "adjusts",
+    "straightens", "shuffles", "curls", "buries", "peeks", "averts", "flushes",
+    "stammers", "swallows", "exhales", "inhales", "shivers", "trembles", "grins",
+    "smirks", "chuckles", "yawns", "stretches", "crosses", "clasps",
+)
+_BARE_ACTION_RE = re.compile(
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+like\b)(?:\s+[\w'’-]+){0,6}$", re.I)
+
+
+def _drop_bare_actions(text: str) -> str:
+    if not text:
+        return text
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    kept = [p for p in parts
+            if p.strip() and not _BARE_ACTION_RE.match(p.strip().strip(".,!?~*()[]— ").strip())]
+    return " ".join(kept).strip()
 
 
 def _drop_trailing_questions(text: str) -> str:

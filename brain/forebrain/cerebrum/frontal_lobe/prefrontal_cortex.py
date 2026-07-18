@@ -230,6 +230,43 @@ _CONT_LABEL = re.compile(
 )
 
 
+# --- bare stage directions ("fidgets with hair", "giggles nervously") ----------
+# RP-tuned models narrate body language even with asterisks banned — and once the
+# asterisks are gone there's nothing for the *action* stripper to catch, so it gets
+# DISPLAYED and SPOKEN ("...How about you? fidgets with hair"). Worse, a trailing bare
+# action shields an end-question from _drop_trailing_questions. Heuristic: a sentence
+# is a bare action beat if it STARTS with a third-person action verb (she's the implied
+# subject) and stays short. Real speech almost never opens with "fidgets/giggles/..."
+# — the one common false-positive shape, "Looks like ...", is excluded.
+_ACTION_VERBS = (
+    "giggles", "blushes", "fidgets", "smiles", "laughs", "sighs", "nods", "shrugs",
+    "looks", "glances", "twirls", "wags", "waves", "winks", "bites", "tucks", "brushes",
+    "hides", "covers", "leans", "tilts", "shifts", "stares", "pouts", "mumbles",
+    "whispers", "murmurs", "hums", "taps", "wraps", "hugs", "clutches", "blinks",
+    "gazes", "fiddles", "squirms", "tugs", "pulls", "scratches", "rubs", "adjusts",
+    "straightens", "shuffles", "curls", "buries", "peeks", "averts", "flushes",
+    "stammers", "swallows", "exhales", "inhales", "shivers", "trembles", "grins",
+    "smirks", "chuckles", "yawns", "stretches", "crosses", "clasps",
+)
+_BARE_ACTION_RE = re.compile(
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+like\b)(?:\s+[\w'’-]+){0,6}$", re.I)
+
+
+def _is_bare_action(fragment: str) -> bool:
+    return bool(_BARE_ACTION_RE.match((fragment or "").strip().strip(".,!?~*()[]— ").strip()))
+
+
+def _drop_bare_actions(text: str) -> str:
+    """Remove whole sentences/fragments that are bare stage directions. Sentences that
+    merely CONTAIN an action word ('She giggles a lot') are untouched — only fragments
+    that ARE an action beat go."""
+    if not text:
+        return text
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [p for p in parts if p.strip() and not _is_bare_action(p)]
+    return " ".join(kept).strip()
+
+
 def _sanitize(text: str) -> str:
     """Strip leaked role labels and cut off any hallucinated extra turn(s)."""
     if not text:
@@ -256,6 +293,10 @@ def _sanitize(text: str) -> str:
     # drop wrapping quotes and collapse whitespace (replies are short, 1-2 sentences)
     t = t.strip().strip('"“”‘’\'').strip()
     t = re.sub(r"\s+", " ", t).strip()
+    # ORDER MATTERS: drop bare stage directions FIRST — a trailing "fidgets with hair"
+    # otherwise shields an end-question ("...How about you? fidgets with hair") from the
+    # no-questions rule below.
+    t = _drop_bare_actions(t)
     # persona hard rule: never END on a question (strip trailing question-sentences)
     return _drop_trailing_questions(t)
 
@@ -321,6 +362,15 @@ def _drop_trailing_questions(text: str) -> str:
     while len(parts) > 1 and parts[-1].rstrip(_QUOTES + ")]").rstrip().endswith("?"):
         parts.pop()
     return " ".join(parts)
+
+
+def _no_bare_actions(sentences):
+    """Streaming twin of _drop_bare_actions: swallow any sentence that IS a bare stage
+    direction ('fidgets with hair') so it's never printed or spoken. Runs BEFORE the
+    no-trailing-question filter so a dropped action can't shield a closing question."""
+    for s in sentences:
+        if not _is_bare_action(s):
+            yield s
 
 
 def _no_trailing_question(sentences):
@@ -432,8 +482,8 @@ def think_stream(history: list[dict], mood_flavor: str = "", memories=None,
         **_PENALTIES,  # discourage echoing her own earlier lines / circling the last topic
         extra_body=_EXTRA,  # disables reasoning when MIRA_NO_THINK=1 (no-op otherwise)
     )
-    # sentence stream, with the persona's no-questions rule enforced on the closer
-    return _no_trailing_question(_stream_sentences(_iter_deltas(stream)))
+    # sentence stream: bare stage directions swallowed, then the no-end-question rule
+    return _no_trailing_question(_no_bare_actions(_stream_sentences(_iter_deltas(stream))))
 
 
 def prefill(history: list[dict], mood_flavor: str = "", memories=None, situation: str = "",
