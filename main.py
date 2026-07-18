@@ -115,6 +115,22 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+# --- single-instance guard ------------------------------------------------------
+# Two Miras at once share one Chroma memory store (transient "hnsw segment reader:
+# Nothing found on disk" turn errors as they race compactions), one Discord token, and
+# one avatar port — nothing good. Holding a localhost socket for the process lifetime
+# is the simplest cross-platform lock: a second launch finds it bound and exits.
+import socket as _socket
+_instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+try:
+    _instance_lock.bind(("127.0.0.1", int(os.environ.get("MIRA_LOCK_PORT", "8235"))))
+    _instance_lock.listen(1)
+except OSError:
+    print("\nAnother Mira/Shiori instance is already running (lock port is taken).")
+    print("Close the other console window first — running two at once corrupts turns "
+          "and fights over the memory store, the Discord bot, and the avatar port.\n")
+    sys.exit(1)
+
 # Simplified pipeline by default: speech in -> Mira thinks (grounded in memories + this
 # session) -> speech out, with no background mind. Opt into the full subconscious with
 # --subconscious.

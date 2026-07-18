@@ -90,7 +90,11 @@ def recall(query, n=3, max_distance=None):
     so a name/fact/detail in the conversation pulls what she knows about it, while generic
     chatter pulls nothing — no random facts bleeding in, and a smaller prompt to prefill.
     Empty list if nothing clears the bar or the embedder is unreachable."""
-    count = _collection.count()
+    try:
+        count = _collection.count()
+    except Exception as e:
+        print(f"[hippocampus] memory store unavailable — no recall this turn: {e}")
+        return []
     if count == 0:
         return []
     try:
@@ -98,11 +102,23 @@ def recall(query, n=3, max_distance=None):
     except Exception as e:
         print(f"[hippocampus] embed unavailable — no recall this turn: {e}")
         return []
-    results = _collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(n, count),
-        include=["documents", "distances"],
-    )
+    # The vector search itself can hiccup transiently (e.g. Chroma's hnsw reader mid-compaction:
+    # "Error creating hnsw segment reader: Nothing found on disk"). A missing memory must never
+    # cost the whole TURN — degrade to "no recall this turn" instead of raising, retrying once
+    # since those races clear immediately.
+    for attempt in (1, 2):
+        try:
+            results = _collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(n, count),
+                include=["documents", "distances"],
+            )
+            break
+        except Exception as e:
+            if attempt == 2:
+                print(f"[hippocampus] memory search failed — no recall this turn: {e}")
+                return []
+            time.sleep(0.25)
     docs = results["documents"][0]
     dists = results["distances"][0]
     bar = _RECALL_MAX_DISTANCE if max_distance is None else max_distance
@@ -218,10 +234,14 @@ def summarize_session():
 
 def last_session():
     """Return the text of the most recent session summary, or None."""
-    got = _collection.get(
-        where={"kind": "session_summary"},
-        include=["documents", "metadatas"],
-    )
+    try:
+        got = _collection.get(
+            where={"kind": "session_summary"},
+            include=["documents", "metadatas"],
+        )
+    except Exception as e:
+        print(f"[hippocampus] couldn't read last session summary: {e}")
+        return None
     docs = got.get("documents") or []
     if not docs:
         return None
@@ -311,15 +331,15 @@ def remember_document(name, text):
 def recall_document(query, n=3, max_distance=None):
     """Retrieve the document chunks most relevant to `query` (across all loaded documents).
     Returns a list of {"name", "text"}; empty if nothing clears the bar or the embedder is down."""
-    if _docs.count() == 0:
-        return []
     try:
+        if _docs.count() == 0:
+            return []
         q = _embed(query)
+        res = _docs.query(query_embeddings=[q], n_results=min(n, _docs.count()),
+                          include=["documents", "metadatas", "distances"])
     except Exception as e:
-        print(f"[hippocampus] embed unavailable — no document recall: {e}")
+        print(f"[hippocampus] document recall unavailable this turn: {e}")
         return []
-    res = _docs.query(query_embeddings=[q], n_results=min(n, _docs.count()),
-                      include=["documents", "metadatas", "distances"])
     docs = res["documents"][0]
     metas = res["metadatas"][0]
     dists = res["distances"][0]
@@ -336,15 +356,15 @@ def recall_full_documents(query, max_words=None):
     text of each — pages exactly as written — not just the matching chunks. Best-matching document
     first; total injected text is capped at max_words (default _DOC_INJECT_MAX_WORDS) so a huge
     manual can't overflow the context. Returns [{"name", "text"}]; empty if nothing's relevant."""
-    if _docs.count() == 0:
-        return []
     try:
+        if _docs.count() == 0:
+            return []
         q = _embed(query)
+        res = _docs.query(query_embeddings=[q], n_results=min(8, _docs.count()),
+                          include=["metadatas", "distances"])
     except Exception as e:
-        print(f"[hippocampus] embed unavailable — no document recall: {e}")
+        print(f"[hippocampus] document recall unavailable this turn: {e}")
         return []
-    res = _docs.query(query_embeddings=[q], n_results=min(8, _docs.count()),
-                      include=["metadatas", "distances"])
     metas, dists = res["metadatas"][0], res["distances"][0]
     # ordered, de-duplicated list of relevant document names (closest match first)
     names = []
