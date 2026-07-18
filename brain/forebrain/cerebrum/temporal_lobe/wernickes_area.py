@@ -95,6 +95,20 @@ def _mic_callback(indata, frames, time_info, status):
         _audio_q.put(indata[:, 0].copy())
 
 
+# Bias the decoder toward names it should EXPECT to hear — above all hers, so "Mira"
+# stops coming out as "Mia"/"Mira"-adjacent mush. Comma-separate extras with
+# MIRA_STT_HOTWORDS (e.g. "Mira, GameRaiderX, Stella").
+def _default_hotwords():
+    try:
+        from brain.forebrain.subcortical_structures.basal_ganglia.action_selector import NAME
+        return NAME
+    except Exception:
+        return "Mira"
+
+
+HOTWORDS = os.environ.get("MIRA_STT_HOTWORDS", "").strip() or _default_hotwords()
+
+
 def _transcribe(buf):
     with _model_lock:
         segments, _ = _model.transcribe(
@@ -103,6 +117,7 @@ def _transcribe(buf):
             beam_size=1,
             condition_on_previous_text=False,
             vad_filter=True,
+            hotwords=HOTWORDS,
         )
         return " ".join(s.text.strip() for s in segments).strip()
 

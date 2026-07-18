@@ -82,11 +82,12 @@ set MIRA_RVC_INDEX=C:\models\rvc_models\mira.index
 set MIRA_RVC_PYTHON=%~dp0.venv-rvc\Scripts\python.exe
 
 REM --- STT: Whisper on the laptop GPU (mic only; game audio is on the desktop) --
-REM Hermes-3 leaves ~2.5 GB VRAM free — enough for small.en float16. If Whisper
-REM OOMs at load, drop to int8_float16 or WHISPER_DEVICE=cpu.
+REM distil-large-v3 (int8_float16): near large-v3 accuracy at ~small speed — fixes the
+REM "Mira" -> "Mia" mishears small.en made (verified: ~0.3s/utterance, 1.25 GB VRAM free
+REM next to the 16k Hermes). Name-biased decoding via hotwords (MIRA_STT_HOTWORDS adds more).
 set WHISPER_DEVICE=cuda
-set WHISPER_MODEL_SIZE=small.en
-set WHISPER_COMPUTE_TYPE=float16
+set WHISPER_MODEL_SIZE=distil-large-v3
+set WHISPER_COMPUTE_TYPE=int8_float16
 
 REM --- Run Mira: stream loadout (NO --vision) ----------------------------------
 python "%~dp0main.py" --discord --twitch --host --game-audio
