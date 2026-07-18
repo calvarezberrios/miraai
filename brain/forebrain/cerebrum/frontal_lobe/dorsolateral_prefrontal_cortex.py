@@ -124,10 +124,17 @@ def intercept(event, *, notify: Callable[[str], None]) -> bool:
     stripped = _strip_address(text)
     body = _norm(stripped)
 
+    # START/STOP are TEXT-ONLY commands: typed at the local console or sent in Discord
+    # text — never a voice transcript. STT mishears of ordinary speech must not be able
+    # to start a session or (worse) end one mid-game. Voice is still RECORDED while a
+    # session runs, and 'recap' stays voice-accessible on purpose (useful hands-free).
+    chan = str(getattr(event, "channel", "") or "")
+    text_cmd = (chan == "discord_text") or bool(getattr(event, "typed", False))
+
     # NOTE on ordering: STOP/RECAP are checked before START, because "stop taking notes"
     # also contains the START phrase "taking notes" — STOP must win.
     if _active:
-        if _STOP_RE.search(body):
+        if text_cmd and _STOP_RE.search(body):
             summary, path = _finalize()
             if path:
                 notify(f"[Notes saved to {path}.]")
@@ -145,8 +152,8 @@ def intercept(event, *, notify: Callable[[str], None]) -> bool:
             notify(recap or "[Nothing noted yet.]")
             return True
 
-        if _START_RE.search(body):
-            notify("[Mira is already taking notes. Say 'stop taking notes' to finish.]")
+        if text_cmd and _START_RE.search(body):
+            notify("[Mira is already taking notes. Type 'stop taking notes' to finish.]")
             return True
 
         if _profile == "ttrpg" and addressed:
@@ -158,8 +165,8 @@ def intercept(event, *, notify: Callable[[str], None]) -> bool:
         _record(speaker, stripped or text)
         return True
 
-    # --- no active session: only a START phrase is a command ---
-    if _START_RE.search(body) and not _STOP_RE.search(body):
+    # --- no active session: only a TYPED/TEXT START phrase is a command ---
+    if text_cmd and _START_RE.search(body) and not _STOP_RE.search(body):
         ttrpg = bool(_TTRPG_RE.search(body))
         m = _TOPIC_RE.search(body)
         topic = (m.group(1).strip() if m else "")
@@ -171,7 +178,8 @@ def intercept(event, *, notify: Callable[[str], None]) -> bool:
         kind = "TTRPG session notes" if ttrpg else "notes"
         extra = f" on {topic}" if topic else ""
         notify(f"[Mira is now taking {kind}{extra}. She'll stay silent and just listen. "
-               f"Say 'recap' for a summary, 'stop taking notes' to finish.]")
+               f"Say 'recap' for a summary; TYPE 'stop taking notes' to finish "
+               f"(start/stop are text-only commands).]")
         return True
 
     return False   # not a START and no session -> let normal chat handle it

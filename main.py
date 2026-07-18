@@ -1219,9 +1219,10 @@ try:
             if args.discord:
                 print("[typing is off in Discord mode — talk to her in Discord. 'quit' exits.]")
             else:
-                # typed local input is always addressed to her
+                # typed local input is always addressed to her (typed=True marks it as
+                # keyboard text, e.g. so text-only commands like note-taking accept it)
                 handle_message(InputEvent(text=typed, speaker="You",
-                                          channel="local", mentioned=True))
+                                          channel="local", mentioned=True, typed=True))
 
 except NotImplementedError as e:
     # An adapter (or a half-built feature) reported it's not ready yet — exit with

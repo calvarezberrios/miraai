@@ -35,6 +35,8 @@ class InputEvent:
     kind: str = FINAL            # FINAL | PARTIAL | INTERRUPT
     channel: str = "local"       # "local" | "discord_voice" | "discord_text"
     raw: Any = None              # underlying source object, if an adapter needs it
+    typed: bool = False          # True only for text the user actually TYPED (local console);
+                                 # distinguishes typed input from mic STT on the same channel
     mentioned: bool = False      # adapter signal: bot was @-mentioned / DM'd / local
     reply_to_her: bool = False   # adapter signal: this message replies to Mira
     is_dm: bool = False          # adapter signal: private DM (no audience)
