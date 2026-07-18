@@ -94,3 +94,4 @@ rvc_models/
 
 # Mira Live session transcripts (local only)
 mira_live/sessions/
+memory_store_backup*/
