@@ -69,9 +69,14 @@ _ACTION_VERBS = (
     "straightens", "shuffles", "curls", "buries", "peeks", "averts", "flushes",
     "stammers", "swallows", "exhales", "inhales", "shivers", "trembles", "grins",
     "smirks", "chuckles", "yawns", "stretches", "crosses", "clasps",
+    "gasps", "frowns", "glares", "huffs", "sniffs", "sniffles", "gulps", "hesitates",
+    "freezes", "perks", "beams", "slumps", "bounces", "cuddles", "snuggles", "fumbles",
+    "paces", "sways", "tenses", "turns",
 )
+# Up to ~12 trailing words so full narrations match ("looks up from the book she is
+# reading"); "looks/sounds like ..." and "turns out ..." are speech and excluded.
 _BARE_ACTION_RE = re.compile(
-    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+like\b)(?:\s+[\w'’-]+){0,6}$", re.I)
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+(?:like|out)\b)(?:\s+[\w'’-]+){0,12}$", re.I)
 
 
 def _is_wrapped_action(fragment: str) -> bool:
@@ -86,11 +91,18 @@ def _is_bare_action(fragment: str) -> bool:
 
 
 def _drop_bare_actions(text: str) -> str:
+    """(Name kept for compatibility) — bare beats are now WRAPPED into *action* form
+    rather than deleted: the model wrote the beat but forgot the asterisks; add them."""
     if not text:
         return text
     parts = re.split(r"(?<=[.!?])\s+", text)
-    kept = [p for p in parts if p.strip() and not _is_bare_action(p)]
-    return " ".join(kept).strip()
+    out = []
+    for p in parts:
+        if p.strip() and _is_bare_action(p):
+            out.append("*" + p.strip().strip(".,!?~ ").strip() + "*")
+        elif p.strip():
+            out.append(p)
+    return " ".join(out).strip()
 
 
 def _drop_trailing_questions(text: str) -> str:

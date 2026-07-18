@@ -538,6 +538,19 @@ _TTS_ACTION_CUES = {
     # kitsune-specific
     "tail", "tails", "wag", "wags", "wagging", "swish", "swishes", "swishing",
     "ear", "ears", "flick", "flicks", "flicking", "twitch", "twitches", "twitching",
+    # gaze / fidget / posture (the dandere's favorite beats)
+    "look", "looks", "looking", "glance", "glances", "glancing", "gaze", "gazes", "gazing",
+    "peek", "peeks", "peeking", "blink", "blinks", "blinking", "avert", "averts",
+    "fidget", "fidgets", "fidgeting", "tuck", "tucks", "tucking", "brush", "brushes",
+    "hide", "hides", "hiding", "bury", "buries", "burying", "clutch", "clutches",
+    "hug", "hugs", "hugging", "squirm", "squirms", "tremble", "trembles", "shiver",
+    "shivers", "freeze", "freezes", "bounce", "bounces", "cuddle", "cuddles",
+    "snuggle", "snuggles", "fumble", "fumbles", "pace", "paces", "sway", "sways",
+    "tug", "tugs", "scratch", "scratches", "rub", "rubs", "adjust", "adjusts",
+    "shuffle", "shuffles", "slump", "slumps", "stammer", "stammers", "swallow",
+    "swallows", "exhale", "exhales", "inhale", "inhales", "hesitate", "hesitates",
+    "mumble", "mumbles", "whisper", "whispers", "murmur", "murmurs", "curl", "curls",
+    "shift", "shifts", "shifting", "tense", "tenses", "straighten", "straightens",
 }
 
 # *word/phrase* and **word/phrase**, not crossing line breaks. Inner capped so a stray
@@ -546,13 +559,21 @@ _STAR_RE = re.compile(r"(?P<stars>\*{1,2})(?P<inner>[^*\n]{1,120}?)(?P=stars)")
 
 
 def _is_tts_action_or_gesture(inner_text):
-    """True for a short action/gesture beat (so TTS drops it and the terminal keeps it).
+    """True for an action/gesture beat (so TTS drops it and the terminal keeps it).
 
-    Examples (action): *snickers*, *sighs*, *tail wag*, *ears twitch*, *pouts playfully*
+    Examples (action): *snickers*, *sighs*, *tail wag*, *pouts playfully*,
+                       *looks up from the book she is reading*
     Examples (emphasis): *finally*, **amusing**, *very important*, *please*
     """
     words = re.findall(r"[a-zA-Z']+", (inner_text or "").lower())
-    if not words or len(words) > 5:
+    if not words:
+        return False
+    # Verb-first narration is a beat even when it's long — "looks up from the book she
+    # is reading" is 8 words and must never be spoken. Emphasis phrases don't start with
+    # a third-person action verb, so a generous cap here is safe.
+    if words[0] in _TTS_ACTION_CUES and len(words) <= 15:
+        return True
+    if len(words) > 5:
         return False
     return any(word in _TTS_ACTION_CUES for word in words)
 

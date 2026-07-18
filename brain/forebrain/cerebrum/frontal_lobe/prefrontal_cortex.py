@@ -247,9 +247,15 @@ _ACTION_VERBS = (
     "straightens", "shuffles", "curls", "buries", "peeks", "averts", "flushes",
     "stammers", "swallows", "exhales", "inhales", "shivers", "trembles", "grins",
     "smirks", "chuckles", "yawns", "stretches", "crosses", "clasps",
+    "gasps", "frowns", "glares", "huffs", "sniffs", "sniffles", "gulps", "hesitates",
+    "freezes", "perks", "beams", "slumps", "bounces", "cuddles", "snuggles", "fumbles",
+    "paces", "sways", "tenses", "turns", "tilts",
 )
+# Up to ~12 trailing words so full narrations match ("looks up from the book she is
+# reading"). The lookahead spares the verb-first SPEECH idioms "looks/sounds like ..."
+# and "turns out ...".
 _BARE_ACTION_RE = re.compile(
-    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+like\b)(?:\s+[\w'’-]+){0,6}$", re.I)
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+(?:like|out)\b)(?:\s+[\w'’-]+){0,12}$", re.I)
 # A properly *wrapped* action — the persona-sanctioned form. These are KEPT in text
 # (displayed as body language + they drive avatar gestures); the TTS layer skips them.
 _WRAPPED_ACTION_RE = re.compile(r"^\*[^*\n]+\*[.,!?~\s]*$")
@@ -266,15 +272,21 @@ def _is_bare_action(fragment: str) -> bool:
     return bool(_BARE_ACTION_RE.match(f.strip(".,!?~*()[]— ").strip()))
 
 
-def _drop_bare_actions(text: str) -> str:
-    """Remove whole sentences/fragments that are bare stage directions. Sentences that
-    merely CONTAIN an action word ('She giggles a lot') are untouched — only fragments
-    that ARE an action beat go."""
+def _wrap_bare_actions(text: str) -> str:
+    """Convert bare stage-direction sentences into the sanctioned *wrapped* form — the
+    model wrote the beat but forgot the asterisks, so add them: shown as body language,
+    drives avatar gestures, and the TTS layer skips it. Sentences that merely CONTAIN an
+    action word ('She giggles a lot') are untouched — only fragments that ARE a beat."""
     if not text:
         return text
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    kept = [p for p in parts if p.strip() and not _is_bare_action(p)]
-    return " ".join(kept).strip()
+    out = []
+    for p in parts:
+        if p.strip() and _is_bare_action(p):
+            out.append("*" + p.strip().strip(".,!?~ ").strip() + "*")
+        elif p.strip():
+            out.append(p)
+    return " ".join(out).strip()
 
 
 def _sanitize(text: str) -> str:
@@ -303,10 +315,10 @@ def _sanitize(text: str) -> str:
     # drop wrapping quotes and collapse whitespace (replies are short, 1-2 sentences)
     t = t.strip().strip('"“”‘’\'').strip()
     t = re.sub(r"\s+", " ", t).strip()
-    # ORDER MATTERS: drop bare stage directions FIRST — a trailing "fidgets with hair"
-    # otherwise shields an end-question ("...How about you? fidgets with hair") from the
-    # no-questions rule below.
-    t = _drop_bare_actions(t)
+    # ORDER MATTERS: wrap bare stage directions FIRST — once wrapped they're silent, so
+    # a trailing beat can't shield an end-question ("...How about you? fidgets with
+    # hair") from the no-questions rule below.
+    t = _wrap_bare_actions(t)
     # persona hard rule: never END on a question (strip trailing question-sentences)
     return _drop_trailing_questions(t)
 
@@ -385,11 +397,14 @@ def _drop_trailing_questions(text: str) -> str:
 
 
 def _no_bare_actions(sentences):
-    """Streaming twin of _drop_bare_actions: swallow any sentence that IS a bare stage
-    direction ('fidgets with hair') so it's never printed or spoken. Runs BEFORE the
-    no-trailing-question filter so a dropped action can't shield a closing question."""
+    """Streaming twin of _wrap_bare_actions: a sentence that IS a bare stage direction
+    ('fidgets with hair') is converted to the *wrapped* form on the fly, so downstream it
+    displays as body language, gestures, and is skipped by TTS. Runs BEFORE the
+    no-trailing-question filter, which treats wrapped actions as silent."""
     for s in sentences:
-        if not _is_bare_action(s):
+        if _is_bare_action(s):
+            yield "*" + s.strip().strip(".,!?~ ").strip() + "*"
+        else:
             yield s
 
 
