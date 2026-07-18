@@ -49,7 +49,7 @@ DRY_BASE = float(os.environ.get("MIRA_DRY_BASE", "1.75"))
 DRY_ALLOWED_LENGTH = int(os.environ.get("MIRA_DRY_ALLOWED_LENGTH", "2"))
 
 # --- her name (shown in the UI; the persona text is the real identity) -------
-NAME = os.environ.get("MIRA_NAME", "Shiori").strip() or "Shiori"
+NAME = os.environ.get("MIRA_NAME", "Mira").strip() or "Mira"
 
 # --- persona ----------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))

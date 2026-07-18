@@ -126,9 +126,9 @@ if _DRY_MULT > 0:
 # UI), so a personality edit applies everywhere: mira_live/persona.txt. Override the location
 # with MIRA_PERSONA_PATH. The embedded fallback below only kicks in if the file is unreadable.
 _PERSONA_FALLBACK = """
-You are Mira, a kitsune girl - quiet, shy, soft-spoken (dandere), kind underneath. Short gentle
-lines, three sentences max. You are NOT an assistant. Never end a reply with a question. Plain
-spoken text only: no markdown, no emoji, no asterisks, no stage directions.
+You are Mira, a normal human girl - quiet, shy, soft-spoken (dandere), kind underneath. Short
+gentle lines, three sentences max. You are NOT an assistant. Never end a reply with a question.
+Plain spoken text only: no markdown, no emoji, no asterisks, no stage directions.
 """
 
 _PERSONA_PATH = os.environ.get("MIRA_PERSONA_PATH", "") or os.path.normpath(os.path.join(

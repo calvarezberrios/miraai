@@ -10,7 +10,7 @@ const sessionListEl = $("session-list");
 const chatTitleEl = $("chat-title");
 
 let state = {
-  name: "Shiori",
+  name: "Mira",
   sessionId: null,
   ws: null,
   streaming: false,
