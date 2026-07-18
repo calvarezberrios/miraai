@@ -126,7 +126,7 @@ if _DRY_MULT > 0:
 # UI), so a personality edit applies everywhere: mira_live/persona.txt. Override the location
 # with MIRA_PERSONA_PATH. The embedded fallback below only kicks in if the file is unreadable.
 _PERSONA_FALLBACK = """
-You are Mira, a normal human girl - quiet, shy, soft-spoken (dandere), kind underneath. Short
+You are Mira, you are quiet, shy, soft-spoken (dandere), kind underneath. Short
 gentle lines, three sentences max. You are NOT an assistant. Never end a reply with a question.
 Plain spoken text only: no markdown, no emoji, no asterisks, no stage directions.
 """
@@ -250,10 +250,20 @@ _ACTION_VERBS = (
 )
 _BARE_ACTION_RE = re.compile(
     r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+like\b)(?:\s+[\w'’-]+){0,6}$", re.I)
+# A properly *wrapped* action — the persona-sanctioned form. These are KEPT in text
+# (displayed as body language + they drive avatar gestures); the TTS layer skips them.
+_WRAPPED_ACTION_RE = re.compile(r"^\*[^*\n]+\*[.,!?~\s]*$")
+
+
+def _is_wrapped_action(fragment: str) -> bool:
+    return bool(_WRAPPED_ACTION_RE.match((fragment or "").strip()))
 
 
 def _is_bare_action(fragment: str) -> bool:
-    return bool(_BARE_ACTION_RE.match((fragment or "").strip().strip(".,!?~*()[]— ").strip()))
+    f = (fragment or "").strip()
+    if f.startswith("*"):
+        return False        # wrapped form is allowed — keep it
+    return bool(_BARE_ACTION_RE.match(f.strip(".,!?~*()[]— ").strip()))
 
 
 def _drop_bare_actions(text: str) -> str:
@@ -355,12 +365,22 @@ def _drop_trailing_questions(text: str) -> str:
     """Enforce the persona's NO-QUESTIONS rule on a finished reply: peel question-sentences off
     the END ("...how about you?", "what do you think?") so she always closes on a statement.
     Mid-reply questions are left alone, and if the WHOLE reply is a question it's kept (better
-    to say something than nothing) — the prompt rule keeps those rare."""
+    to say something than nothing) — the prompt rule keeps those rare.
+
+    Trailing *wrapped actions* are SILENT (TTS skips them), so they're transparent here:
+    "How about you? *giggles*" still ends on a spoken question and the question goes."""
     if not text:
         return text
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    while len(parts) > 1 and parts[-1].rstrip(_QUOTES + ")]").rstrip().endswith("?"):
-        parts.pop()
+    while len(parts) > 1:
+        i = len(parts) - 1
+        while i >= 0 and _is_wrapped_action(parts[i]):
+            i -= 1                                   # skip silent actions to the last SPOKEN part
+        if i < 0:
+            break                                    # only actions left
+        if not parts[i].rstrip(_QUOTES + ")]").rstrip().endswith("?"):
+            break                                    # closes on a statement — done
+        parts.pop(i)                                 # drop the closing spoken question
     return " ".join(parts)
 
 
@@ -375,16 +395,27 @@ def _no_bare_actions(sentences):
 
 def _no_trailing_question(sentences):
     """Streaming twin of _drop_trailing_questions. Statements pass through immediately (no
-    latency cost); a sentence ending in '?' is HELD — emitted only if more speech follows
-    (mid-reply question), silently dropped if it was the closer. If the very first and only
-    sentence is a question, it's spoken (never leave her mute)."""
-    held = None
-    emitted = False
+    latency cost); a sentence ending in '?' is HELD — emitted only if more SPEECH follows
+    (mid-reply question), silently dropped if it was the closer. *Wrapped actions* are
+    silent, so they don't release a held question ("How about you? *giggles*" -> the
+    question still dies; the gesture is queued and survives). If the very first and only
+    spoken sentence is a question, it's spoken (never leave her mute)."""
+    held = None                      # a question waiting to learn if it's the closer
+    after = []                       # silent actions that arrived while holding it
+    emitted = False                  # has any SPEECH been emitted yet
     for s in sentences:
+        if _is_wrapped_action(s):
+            if held is not None:
+                after.append(s)      # silent — doesn't prove the question was mid-reply
+            else:
+                yield s              # gesture beat, pass straight through (not speech)
+            continue
         if held is not None:
-            yield held               # more speech followed -> the question was mid-reply
+            yield held               # real speech followed -> the question was mid-reply
             emitted = True
-            held = None
+            for a in after:
+                yield a
+            held, after = None, []
         if s.rstrip(_QUOTES + ")]").rstrip().endswith("?"):
             held = s
         else:
@@ -392,6 +423,8 @@ def _no_trailing_question(sentences):
             emitted = True
     if held is not None and not emitted:
         yield held                   # entire reply was one question -> keep it
+    for a in after:
+        yield a                      # gestures after a dropped closer still play
 
 
 def _stream_sentences(deltas):
