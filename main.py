@@ -816,6 +816,29 @@ def _speculative_prefill(event):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _heard_source(event):
+    """Where a heard-but-unanswered message came from, for the [heard] log — so a stray
+    speaker is instantly traceable ("#general @ SomeServer" pinpoints a text channel in
+    another server, which otherwise looks like a ghost in the VC)."""
+    ch = str(getattr(event, "channel", "") or "")
+    raw = getattr(event, "raw", None)
+    if ch == "discord_text":
+        if getattr(event, "is_dm", False) or getattr(raw, "guild", None) is None:
+            return "DM"
+        name = getattr(raw, "name", None) or "?"
+        guild = getattr(getattr(raw, "guild", None), "name", None) or "?"
+        return f"#{name} @ {guild}"
+    if ch == "discord_voice":
+        name = getattr(raw, "name", None)
+        guild = getattr(getattr(raw, "guild", None), "name", None)
+        return f"VC {name} @ {guild}" if name and guild else "VC"
+    if ch == "twitch_chat":
+        return "Twitch"
+    if ch == "game_audio":
+        return "game audio"
+    return ch or "local"
+
+
 def _take_prefill(text):
     """If a completed prefill matches this finalized turn, hand back its recalled memories so
     handle_message can skip re-recalling (the LLM prefix is already warm). Consumes the cache."""
@@ -957,7 +980,7 @@ def handle_message(event, interrupting=False):
         in_cooldown = last_chime is not None and (now - last_chime) < CHIME_COOLDOWN_SEC
         if _too_thin_to_chime(event.text) or in_cooldown:
             if LOG_HEARD:
-                print(f"[heard] {event.speaker}: {event.text}")
+                print(f"[heard {_heard_source(event)}] {event.speaker}: {event.text}")
             return
         memories, ident_speaker, speaker_known, documents = _recall_for(event)
         if previous_session:
@@ -974,14 +997,14 @@ def handle_message(event, interrupting=False):
             speak_reply(line, user_text=event.text, channel=chan_key,
                         speaker=event.speaker, source="chime-in")
         elif LOG_HEARD:
-            print(f"[heard] {event.speaker}: {event.text}")
+            print(f"[heard {_heard_source(event)}] {event.speaker}: {event.text}")
     else:
         # Other un-addressed input (e.g. Discord text not @/named). With the subconscious
         # on, hand it off to consider a chime-in; otherwise she just listens.
         if USE_SUBCONSCIOUS:
             subconscious.end_listening()   # stop drafting; this wasn't for her to answer now
         if LOG_HEARD:
-            print(f"[heard] {event.speaker}: {event.text}")
+            print(f"[heard {_heard_source(event)}] {event.speaker}: {event.text}")
         if USE_SUBCONSCIOUS:
             subconscious.heard(now, channel=chan_key)
 
