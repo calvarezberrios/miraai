@@ -551,6 +551,12 @@ _TTS_ACTION_CUES = {
     "swallows", "exhale", "exhales", "inhale", "inhales", "hesitate", "hesitates",
     "mumble", "mumbles", "whisper", "whispers", "murmur", "murmurs", "curl", "curls",
     "shift", "shifts", "shifting", "tense", "tenses", "straighten", "straightens",
+    "trail", "trails", "trailing", "toy", "toys", "toying", "plays", "playing",
+    "twiddle", "twiddles", "twiddling", "rest", "rests", "resting", "wring", "wrings",
+    "trace", "traces", "tracing", "twist", "twists", "twisting", "chew", "chews",
+    "chewing", "nibble", "nibbles", "nibbling", "pick", "picks", "picking",
+    "drum", "drums", "drumming", "flip", "flips", "flipping", "scoot", "scoots",
+    "settle", "settles", "plop", "plops", "clasped",
 }
 
 # *word/phrase* and **word/phrase**, not crossing line breaks. Inner capped so a stray
@@ -571,7 +577,7 @@ def _is_tts_action_or_gesture(inner_text):
     # Verb-first narration is a beat even when it's long — "looks up from the book she
     # is reading" is 8 words and must never be spoken. Emphasis phrases don't start with
     # a third-person action verb, so a generous cap here is safe.
-    if words[0] in _TTS_ACTION_CUES and len(words) <= 15:
+    if words[0] in _TTS_ACTION_CUES and len(words) <= 24:
         return True
     if len(words) > 5:
         return False

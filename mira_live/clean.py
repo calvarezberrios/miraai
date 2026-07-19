@@ -72,11 +72,35 @@ _ACTION_VERBS = (
     "gasps", "frowns", "glares", "huffs", "sniffs", "sniffles", "gulps", "hesitates",
     "freezes", "perks", "beams", "slumps", "bounces", "cuddles", "snuggles", "fumbles",
     "paces", "sways", "tenses", "turns",
+    "trails", "toys", "plays", "twiddles", "shakes", "rests", "folds", "wrings",
+    "traces", "twists", "chews", "nibbles", "picks", "drums", "flips", "scoots",
+    "settles", "plops",
 )
 # Up to ~12 trailing words so full narrations match ("looks up from the book she is
 # reading"); "looks/sounds like ..." and "turns out ..." are speech and excluded.
 _BARE_ACTION_RE = re.compile(
     r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+(?:like|out)\b)(?:\s+[\w'’-]+){0,12}$", re.I)
+_ACTION_START_RE = re.compile(
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")\b(?!\s+(?:like|out)\b)", re.I)
+
+
+def _split_bare_action(fragment: str):
+    """If the fragment BEGINS with a bare beat — commas allowed, possibly fused straight
+    into speech ("blinks in confusion Hmm?") — split (beat, rest). Beats are lowercase;
+    speech resumes at a Capitalized token. None if the fragment doesn't open on a beat."""
+    f = (fragment or "").strip()
+    if not f or f.startswith("*") or not _ACTION_START_RE.match(f):
+        return None
+    tokens = f.split()
+    i = 1
+    while i < len(tokens):
+        core = tokens[i].strip(",;()—-")
+        if core and (core[0].isupper() or core[0] in "\"'“”‘’*"):
+            break
+        i += 1
+    beat = " ".join(tokens[:i]).rstrip(",;.!?~ ").strip()
+    rest = " ".join(tokens[i:]).strip()
+    return (beat, rest)
 
 
 def _is_wrapped_action(fragment: str) -> bool:
@@ -91,16 +115,20 @@ def _is_bare_action(fragment: str) -> bool:
 
 
 def _drop_bare_actions(text: str) -> str:
-    """(Name kept for compatibility) — bare beats are now WRAPPED into *action* form
-    rather than deleted: the model wrote the beat but forgot the asterisks; add them."""
+    """(Name kept for compatibility) — bare beats are WRAPPED into *action* form rather
+    than deleted, including beats fused into the front of a sentence."""
     if not text:
         return text
     parts = re.split(r"(?<=[.!?])\s+", text)
     out = []
     for p in parts:
-        if p.strip() and _is_bare_action(p):
-            out.append("*" + p.strip().strip(".,!?~ ").strip() + "*")
-        elif p.strip():
+        if not p.strip():
+            continue
+        split = _split_bare_action(p)
+        if split:
+            beat, rest = split
+            out.append("*" + beat + "*" + ((" " + rest) if rest else ""))
+        else:
             out.append(p)
     return " ".join(out).strip()
 

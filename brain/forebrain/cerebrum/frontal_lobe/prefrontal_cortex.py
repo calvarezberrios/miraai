@@ -250,12 +250,41 @@ _ACTION_VERBS = (
     "gasps", "frowns", "glares", "huffs", "sniffs", "sniffles", "gulps", "hesitates",
     "freezes", "perks", "beams", "slumps", "bounces", "cuddles", "snuggles", "fumbles",
     "paces", "sways", "tenses", "turns", "tilts",
+    "trails", "toys", "plays", "twiddles", "shakes", "rests", "folds", "wrings",
+    "traces", "twists", "chews", "nibbles", "picks", "drums", "flips", "scoots",
+    "settles", "plops", "fiddles",
 )
 # Up to ~12 trailing words so full narrations match ("looks up from the book she is
 # reading"). The lookahead spares the verb-first SPEECH idioms "looks/sounds like ..."
 # and "turns out ...".
 _BARE_ACTION_RE = re.compile(
     r"^(?:" + "|".join(_ACTION_VERBS) + r")(?!\s+(?:like|out)\b)(?:\s+[\w'’-]+){0,12}$", re.I)
+_ACTION_START_RE = re.compile(
+    r"^(?:" + "|".join(_ACTION_VERBS) + r")\b(?!\s+(?:like|out)\b)", re.I)
+
+
+def _split_bare_action(fragment: str):
+    """If `fragment` BEGINS with a bare action beat, split it into (beat, rest_of_speech).
+
+    Real Hermes output fuses beats into speech with no punctuation and puts commas inside
+    them — "blinks in confusion for a moment, then looks down at her hands Hmm?" — so the
+    whole-fragment regex alone can't catch them. The model writes beats in lowercase and
+    resumes SPEECH at a Capitalized word, so: consume lowercase tokens (commas included)
+    from the action verb until a capitalized token (or the end), wrap that as the beat,
+    and keep the remainder as speech. Returns None if the fragment doesn't open on a beat."""
+    f = (fragment or "").strip()
+    if not f or f.startswith("*") or not _ACTION_START_RE.match(f):
+        return None
+    tokens = f.split()
+    i = 1
+    while i < len(tokens):
+        core = tokens[i].strip(",;()—-")
+        if core and (core[0].isupper() or core[0] in "\"'“”‘’*"):
+            break                        # speech (or a wrapped beat) resumes here
+        i += 1
+    beat = " ".join(tokens[:i]).rstrip(",;.!?~ ").strip()
+    rest = " ".join(tokens[i:]).strip()
+    return (beat, rest)
 # A properly *wrapped* action — the persona-sanctioned form. These are KEPT in text
 # (displayed as body language + they drive avatar gestures); the TTS layer skips them.
 _WRAPPED_ACTION_RE = re.compile(r"^\*[^*\n]+\*[.,!?~\s]*$")
@@ -273,18 +302,24 @@ def _is_bare_action(fragment: str) -> bool:
 
 
 def _wrap_bare_actions(text: str) -> str:
-    """Convert bare stage-direction sentences into the sanctioned *wrapped* form — the
-    model wrote the beat but forgot the asterisks, so add them: shown as body language,
-    drives avatar gestures, and the TTS layer skips it. Sentences that merely CONTAIN an
-    action word ('She giggles a lot') are untouched — only fragments that ARE a beat."""
+    """Convert bare stage-direction text into the sanctioned *wrapped* form — the model
+    wrote the beat but forgot the asterisks, so add them: shown as body language, drives
+    avatar gestures, and the TTS layer skips it. Handles both a fragment that IS a beat
+    and a beat FUSED into speech ("blinks in confusion Hmm?" -> "*blinks in confusion*
+    Hmm?"). Sentences that merely CONTAIN an action word ('She giggles a lot') are
+    untouched — beats are only recognized at a fragment's start."""
     if not text:
         return text
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     out = []
     for p in parts:
-        if p.strip() and _is_bare_action(p):
-            out.append("*" + p.strip().strip(".,!?~ ").strip() + "*")
-        elif p.strip():
+        if not p.strip():
+            continue
+        split = _split_bare_action(p)
+        if split:
+            beat, rest = split
+            out.append("*" + beat + "*" + ((" " + rest) if rest else ""))
+        else:
             out.append(p)
     return " ".join(out).strip()
 
@@ -397,13 +432,17 @@ def _drop_trailing_questions(text: str) -> str:
 
 
 def _no_bare_actions(sentences):
-    """Streaming twin of _wrap_bare_actions: a sentence that IS a bare stage direction
-    ('fidgets with hair') is converted to the *wrapped* form on the fly, so downstream it
-    displays as body language, gestures, and is skipped by TTS. Runs BEFORE the
-    no-trailing-question filter, which treats wrapped actions as silent."""
+    """Streaming twin of _wrap_bare_actions: a bare beat (whole sentence OR fused into
+    the front of one) is converted to *wrapped* form on the fly — displayed as body
+    language, gestures, skipped by TTS. The wrapped beat and the remaining speech are
+    yielded separately so the no-trailing-question filter sees the beat as silent."""
     for s in sentences:
-        if _is_bare_action(s):
-            yield "*" + s.strip().strip(".,!?~ ").strip() + "*"
+        split = _split_bare_action(s)
+        if split:
+            beat, rest = split
+            yield "*" + beat + "*"
+            if rest:
+                yield rest
         else:
             yield s
 
