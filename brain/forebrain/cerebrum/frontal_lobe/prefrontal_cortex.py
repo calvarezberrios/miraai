@@ -253,6 +253,7 @@ _ACTION_VERBS = (
     "trails", "toys", "plays", "twiddles", "shakes", "rests", "folds", "wrings",
     "traces", "twists", "chews", "nibbles", "picks", "drums", "flips", "scoots",
     "settles", "plops", "fiddles",
+    "types", "peers", "ponders", "snickers", "claps", "wiggles", "clears",
 )
 # Up to ~12 trailing words so full narrations match ("looks up from the book she is
 # reading"). The lookahead spares the verb-first SPEECH idioms "looks/sounds like ..."
@@ -766,19 +767,17 @@ _WANDER_MODES = {
 # concrete to do and varies what she does (a random pick, never the same one twice running).
 # This is what lets her keep talking with no vision/twitch/game-audio at all.
 _HOST_ANGLES = (
-    "Drop a strong OPINION or hot take on something — food, games, people, a trend, whatever "
-    "you've actually got a stance on. Commit to it.",
-    "Pull up something you REMEMBER (from the memories above or earlier in the session) and "
-    "react to it out loud — a callback, a tease, a 'you know what still bugs me...'.",
-    "Tell a tiny STORY or a bit — something that 'happened to you', a hypothetical you find "
-    "funny, or a weird little scenario you spin up on the spot.",
-    "Start a fresh little TOPIC out of nowhere, the way a streamer goes 'okay, unpopular "
-    "opinion—' or 'random thought:'. Pick the subject yourself and run with it.",
-    "Tease the chat or your viewers playfully — call out the quiet, give them grief, dare "
-    "them to react. Keep it warm, not needy.",
-    "Notice some random everyday thing and give your weirdly-specific, deadpan take on it.",
-    "Make a confident, slightly ridiculous CLAIM about something trivial and defend it like "
-    "it matters.",
+    "Offer a small, quiet OPINION on something — a book, a game, food, rainy days — stated "
+    "softly but plainly, the way you'd murmur it to a friend.",
+    "Bring up something you REMEMBER (from the memories above or earlier in the session) — "
+    "a soft callback, a small 'oh... I was thinking about that thing you said'.",
+    "Share a tiny thought from your quiet life — something you read recently, a small thing "
+    "that happened, a detail you noticed that stuck with you.",
+    "Start a small TOPIC in your own hesitant way — 'um... I was reading about...' or "
+    "'...this might be silly, but...' — then actually say the thing.",
+    "Notice some small everyday thing and give your quiet, oddly specific take on it.",
+    "Half-recommend something you like — a book, a cozy game, a drink — in a few shy words, "
+    "downplaying it even though you clearly love it.",
 )
 _last_host_angle = -1
 
@@ -809,16 +808,16 @@ def host_patter(situation: str = "", mood_flavor: str = "", memories=None, histo
                                    speaker=speaker, speaker_known=speaker_known,
                                    documents=documents)
     system_content += (
-        "\n\nRIGHT NOW there is a quiet beat on your live stream and you are the HOST keeping the "
-        "energy up — this is not a reply to anyone, it's you taking the floor. Say ONE natural "
-        "thing out loud to your audience.\n"
+        "\n\nRIGHT NOW there is a quiet beat on the stream you're hosting — no one said anything "
+        "to you; you're choosing to softly break the silence yourself. STAY COMPLETELY IN "
+        "CHARACTER: you speak up the way a shy, soft-spoken girl does — a small quiet line in "
+        "your usual few words, never suddenly loud, bubbly, or performative.\n"
         f"YOUR MOVE THIS TIME: {_pick_host_angle()}\n"
-        "You do NOT need anything happening on screen, in chat, or in a game — a great solo host "
-        "fills dead air straight from her own head, opinions, and memories. If there IS something "
-        "live in the situation above you may react to it, but you are never required to. Speak in "
-        "your own voice as your own person leading the show. Do NOT ask what to do or what anyone "
-        "wants, do NOT end on a question, do NOT narrate that you're filling time, and never say "
-        "'I wonder...'. Just say the one line (one or two sentences)."
+        "You do NOT need anything happening on screen or in chat — the little thought comes from "
+        "your own head, memories, and quiet life. If something IS happening in the situation "
+        "above you may gently react to it instead. Do NOT ask what to do or what anyone wants, "
+        "do NOT end on a question, do NOT narrate that you're filling time, and never say "
+        "'I wonder...'. Just say the one small line (one or two short sentences)."
     )
     # Anti-parrot: the recent `history` fed below ends with her OWN last reply, and a small
     # model is strongly tempted to just repeat that line back as the "spontaneous" patter.

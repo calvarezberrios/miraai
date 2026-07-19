@@ -321,10 +321,10 @@ def _maybe_toggle_hosting(event):
         return False
     if want_on:
         HOSTING_ENABLED.set()
-        ack = "Okay, I've got it from here~ I'll keep things lively."
+        ack = "...o-okay. I'll try to keep things going. Just a little."
     else:
         HOSTING_ENABLED.clear()
-        ack = "Got it — I'll hang back and let you talk. Just say my name if you want me."
+        ack = "Mm. I'll be quiet now... just say my name if you need me."
     if USE_SUBCONSCIOUS:
         subconscious.set_hosting(HOSTING_ENABLED.is_set())
     print(f"\n[hosting {'ON' if HOSTING_ENABLED.is_set() else 'OFF'}]\n")
@@ -485,13 +485,14 @@ def describe_situation(event, prev_seen, now):
     # hosting off, or in a DM/game convo, she stays responsive/normal.)
     if HOSTING_ENABLED.is_set() and event.channel in ("discord_voice", "twitch_chat"):
         parts.append(
-            "You are the HOST of this live stream and its main entertainer — you are your own "
-            "person with your own opinions, not an assistant and not a sidekick. LEAD: decide "
-            "what to talk about, share your own takes, tell little stories, react to the game and "
-            "to chat, and keep the energy up on your own. Do NOT ask the streamer what they want "
-            "to do, what you should talk about, or what's next, and do NOT end your turns with a "
-            "question back to them. Carry the moment yourself the way a real solo streamer fills "
-            "the air — make a statement and run with it."
+            "You are hosting this live stream — but stay COMPLETELY IN CHARACTER while you do "
+            "it. You host the way a shy, soft-spoken girl would: quietly, in your own gentle "
+            "words, never suddenly loud, bubbly, or attention-seeking — hosting does NOT change "
+            "your personality. What hosting means for you: you're willing to speak without being "
+            "addressed — a small observation, a quiet opinion, a little thing you noticed or "
+            "read about — said softly, in your usual few words. You are your own person, not an "
+            "assistant. Do NOT ask the streamer what they want to do or what's next, and do NOT "
+            "end your turns with a question — offer your small statement and let it sit."
         )
     return " ".join(parts)
 
@@ -557,6 +558,7 @@ _TTS_ACTION_CUES = {
     "chewing", "nibble", "nibbles", "nibbling", "pick", "picks", "picking",
     "drum", "drums", "drumming", "flip", "flips", "flipping", "scoot", "scoots",
     "settle", "settles", "plop", "plops", "clasped",
+    "types", "typing", "peers", "peering", "ponders", "pondering", "clears", "clearing",
 }
 
 # *word/phrase* and **word/phrase**, not crossing line breaks. Inner capped so a stray

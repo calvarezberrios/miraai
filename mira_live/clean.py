@@ -75,6 +75,7 @@ _ACTION_VERBS = (
     "trails", "toys", "plays", "twiddles", "shakes", "rests", "folds", "wrings",
     "traces", "twists", "chews", "nibbles", "picks", "drums", "flips", "scoots",
     "settles", "plops",
+    "types", "peers", "ponders", "snickers", "claps", "wiggles", "clears",
 )
 # Up to ~12 trailing words so full narrations match ("looks up from the book she is
 # reading"); "looks/sounds like ..." and "turns out ..." are speech and excluded.
