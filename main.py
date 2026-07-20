@@ -28,6 +28,7 @@ from brain.forebrain.cerebrum.frontal_lobe import motor_cortex
 from brain.forebrain.cerebrum.frontal_lobe import brocas_area
 from brain.forebrain.cerebrum.frontal_lobe import dorsolateral_prefrontal_cortex as scribe
 from brain.forebrain.cerebrum.frontal_lobe.games import game_master
+from brain.forebrain.cerebrum.frontal_lobe.games import dnd_player
 from brain.forebrain.cerebrum.cingulate_cortex import posterior_cingulate_cortex as subconscious
 from brain.hindbrain.cerebellum import coordinator as cerebellum
 from brain.forebrain.subcortical_structures.thalamus import receive, remember_reply, snapshot
@@ -477,6 +478,11 @@ def describe_situation(event, prev_seen, now):
             "conversation and may join in."
         )
     # Ambient awareness: broadcast state, what she can hear from the game, what's on screen.
+    # At the D&D table: her character sheet + recent engine rolls, so ordinary replies
+    # stay in-game and in-character (and she knows never to invent dice results).
+    dnd_note = dnd_player.situation_note()
+    if dnd_note:
+        parts.append(dnd_note)
     ambient = _ambient_context()
     if ambient:
         parts.append(ambient)
@@ -867,6 +873,12 @@ def handle_message(event, interrupting=False):
     # consumes the event (records it, or handles a start/stop/recap/cast command) and
     # she neither replies nor lets her subconscious chime in. Returns False when there's
     # no active session AND this isn't a "take notes" command, so normal chat proceeds.
+    # D&D player mode (she's a party member; a human DMs). Checked BEFORE the scribe so
+    # "mira roll perception" still works while she's note-taking a session. Only consumes
+    # NAME-addressed D&D commands, so normal table chatter (and notes) flow on untouched.
+    if dnd_player.intercept(event, notify=adapter.notify, speak=speak_reply):
+        return
+
     if scribe.intercept(event, notify=adapter.notify):
         return
 
@@ -1249,6 +1261,7 @@ try:
         if typed.lower() in ("quit", "exit"):
             scribe.finalize_if_active(notify=adapter.notify)  # save any open note session
             game_master.finalize_if_active(notify=adapter.notify)  # save an in-progress Deep IQ game
+            dnd_player.finalize_if_active(notify=adapter.notify)     # save her D&D character
             if DRAFTING:
                 subconscious.stop()                   # quiet her mind / stop the drafter first
             if stream_status is not None:
