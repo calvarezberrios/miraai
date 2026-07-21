@@ -384,26 +384,52 @@ class Character:
         return c
 
 
-def create_character(clazz: str = "wizard", race: str = "elf", name: str = "Melisande",
-                     level: int = 3) -> Tuple[Character, str]:
-    """Roll a fresh character: 4d6-drop-lowest stats auto-assigned by class priority,
-    racial bonuses, HP = max die + avg per further level + CON. Returns (char, roll_report)."""
+STANDARD_ARRAY = [15, 14, 13, 12, 10, 8]     # 5e PHB standard array
+
+
+def _finalize_hp_slots(c: "Character") -> None:
+    """Set HP (max die at 1st, average+CON per level after) and 1st-level slots from
+    class + level + CON. Called after scores are finalized."""
+    die = CLASSES[c.clazz]["hit_die"]
+    con = c.m("CON")
+    c.max_hp = max(1, die + con + sum((die // 2 + 1) + con for _ in range(c.level - 1)))
+    c.hp = c.max_hp
+    c.max_slots = _slots_for(c.clazz, c.level)
+    c.slots = c.max_slots
+
+
+def build_character(clazz: str, race: str = "human", name: str = "Adventurer", level: int = 1,
+                    scores: Optional[dict] = None, array: Optional[list] = None) -> Tuple[Character, str]:
+    """Build a character with EXPLICIT control (for step-by-step creation):
+      - scores: a full {ABILITY: base_score} dict the user assigned -> used as-is (pre-race).
+      - array : six unassigned numbers -> assigned to abilities by the class's stat priority.
+      - neither: roll 4d6-drop-lowest and assign by priority.
+    Racial bonuses are then applied. Returns (char, report)."""
     clazz = clazz if clazz in CLASSES else "wizard"
     race = race if race in RACES else "human"
-    array = roll_stat_array()
-    scores = {}
-    for ability, score in zip(CLASSES[clazz]["stat_priority"], array):
-        scores[ability] = score
+    level = max(1, min(20, int(level)))
+    if scores and all(a in scores for a in ABILITIES):
+        base = {a: int(scores[a]) for a in ABILITIES}
+        method = "your assigned scores"
+    else:
+        if not array:
+            array = roll_stat_array()
+            method = f"rolled (4d6 drop lowest): {array}"
+        else:
+            method = f"assigned array {list(array)}"
+        base = {}
+        for ability, score in zip(CLASSES[clazz]["stat_priority"], array):
+            base[ability] = score
     for ability, bonus in RACES[race]["bonus"].items():
-        scores[ability] = scores.get(ability, 10) + bonus
-    c = Character(name=name, race=race, clazz=clazz, level=max(1, level), scores=scores)
-    die = CLASSES[clazz]["hit_die"]
-    con = c.m("CON")
-    c.max_hp = die + con + sum((die // 2 + 1) + con for _ in range(c.level - 1))
-    c.max_hp = max(1, c.max_hp)
-    c.hp = c.max_hp
-    c.max_slots = _slots_for(clazz, c.level)
-    c.slots = c.max_slots
-    report = (f"Rolled stats (4d6 drop lowest): {array} -> assigned for a {clazz}. "
+        base[ability] = base.get(ability, 10) + bonus
+    c = Character(name=name, race=race, clazz=clazz, level=level, scores=base)
+    _finalize_hp_slots(c)
+    report = (f"Stats {method}, {race} bonuses applied. "
               f"HP {c.max_hp}, AC {c.ac}" + (f", {c.max_slots} 1st-level slots" if c.max_slots else ""))
     return c, report
+
+
+def create_character(clazz: str = "wizard", race: str = "elf", name: str = "Melisande",
+                     level: int = 3) -> Tuple[Character, str]:
+    """Quick roll (legacy convenience): 4d6-drop-lowest, priority-assigned."""
+    return build_character(clazz=clazz, race=race, name=name, level=level)

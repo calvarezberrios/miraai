@@ -982,6 +982,10 @@ def handle_message(event, interrupting=False):
                                  speaker=ident_speaker, speaker_known=speaker_known,
                                  documents=documents)
 
+        # While she's at the D&D table, a normal (non-engine) reply must never STATE a die
+        # result — the engine owns all dice. Scrub any fabricated roll/number she slips in
+        # (works on a plain draft string or the streamed sentence generator).
+        reply = dnd_player.scrub(reply)
         speak_reply(reply, user_text=event.text, channel=chan_key,
                     interrupting=interrupting, speaker=event.speaker)
     elif event.channel in ("discord_voice", "twitch_chat") and HOSTING_ENABLED.is_set():
@@ -1012,6 +1016,7 @@ def handle_message(event, interrupting=False):
             context, color(), memories, situation=situation,
             speaker=ident_speaker, speaker_known=speaker_known, documents=documents,
             reserved=crowded)
+        line = dnd_player.scrub_text(line)   # no fabricated dice in D&D chime-ins either
         if line:
             _last_chime[chan_key] = now
             speak_reply(line, user_text=event.text, channel=chan_key,
