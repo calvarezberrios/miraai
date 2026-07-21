@@ -157,12 +157,14 @@ def _load_by_name(name: str) -> Optional[eng.Character]:
 # ---------------------------------------------------------------------------
 _RULES = (
     "HARD RULES — follow exactly:\n"
-    "- The game engine ALREADY rolled the real dice. The RESULT lines are EXACTLY what happened "
-    "— final and true.\n"
-    "- Your ONLY job is to announce that result to the table in your quiet voice: state the "
-    "final total (and natural 20 / natural 1 if present) EXACTLY as written.\n"
-    "- NEVER roll, re-roll, change, or invent any number, die, HP, or spell effect. Do not write "
-    "dice notation like 'd20(17)'; just say the totals in words.\n"
+    "- The game engine ALREADY rolled the real dice. The RESULT line is EXACTLY what happened — "
+    "final and true.\n"
+    "- Announce that result to the table in your quiet voice: SAY THE FINAL TOTAL out loud (e.g. "
+    "'that's a 13 to hit, and 11 piercing if it lands'), including natural 20 / natural 1 if noted.\n"
+    "- Do NOT decide whether an attack HIT or MISSED, or whether a check SUCCEEDED or FAILED — the "
+    "DM decides that. Just report your number and let them call it.\n"
+    "- NEVER roll, re-roll, change, or invent any number, die, HP, or spell effect. Don't write "
+    "dice notation like 'd20(17)'; say totals in words.\n"
     "- ONE or TWO short sentences, softly, in character. No markdown, no emoji, at most one small "
     "*action* in asterisks, never end on a question.")
 
@@ -190,6 +192,30 @@ def _narrate(event, result_lines, speak, *, flavor_note: str = ""):
     except Exception as e:
         print(f"[dnd] narration error ({e}); speaking the raw result")
         speak(log, user_text=event.text, channel=chan, speaker=getattr(event, "speaker", None))
+
+
+def _ddb_import(event, url_or_id, notify, speak):
+    global _active, _char, _draft
+    from . import dnd_beyond as _ddb
+    notify("[D&D] Importing from D&D Beyond...")
+    try:
+        c, imp_notes = _ddb.import_character(url_or_id)
+    except Exception as e:
+        notify(f"[D&D] Import failed: {e}")
+        with _lock:
+            _active = True
+        return
+    with _lock:
+        _active = True
+        _char = c
+        _draft = None
+        _save(c)
+    notify("[D&D] Imported from D&D Beyond — compare this to your sheet on the site:")
+    notify(c.sheet_panel())
+    for n in imp_notes:
+        notify("  note: " + n)
+    _narrate(event, [f"You loaded your real character from D&D Beyond: {c.short_summary()}."],
+             speak, flavor_note="quietly pleased to have your actual character ready")
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +348,9 @@ def _do_roll(rest: str, adv: int):
         return r
     if re.search(r"\b(attack|roll to hit|make an attack|swing (?:my|her|at)|fire (?:my|at|an "
                  r"arrow|the bow)|shoot(?:s|ing)?\b)", rest):
-        return _char.attack(adv)
+        wm = re.search(r"\bwith (?:my |her |the |a |an )?(?P<wep>[a-z'+ ]+?)(?:\s+(?:at|on|against|"
+                       r"toward|towards)\b|$)", rest)
+        return _char.attack_with(wm.group("wep").strip() if wm else None, adv)
     m = re.search(r"\btake[sn]?\s+(\d+)(?:\s+points?)?(?:\s+of)?\s+damage\b", rest) \
         or re.search(r"\b(\d+)\s+(?:points? of\s+)?damage\b", rest)
     if m:
@@ -379,6 +407,31 @@ def intercept(event, *, notify: Callable[[str], None], speak: Callable) -> bool:
         notify(_draft_status())
         _narrate(event, ["You're about to make a new D&D character together, step by step."],
                  speak, flavor_note="you're shyly excited to build a character")
+        return True
+
+    # ---- import from / sync with D&D Beyond (also enters mode) ----
+    if re.search(r"\bsync\b", rest) and re.search(r"\b(character|sheet|dndbeyond|ddb|beyond)\b", rest):
+        with _lock:
+            cur = _char
+        if cur is None or not cur.ddb_id:
+            notify("[D&D] Nothing to sync — first load one with "
+                   "'mira use your dndbeyond character <url>'.")
+            with _lock:
+                _active = True
+            return True
+        _ddb_import(event, cur.ddb_id, notify, speak)
+        return True
+    if re.search(r"\b(dndbeyond|d and d beyond|d&d ?beyond|ddb|beyond20)\b", rest) \
+            or (re.search(r"\bimport\b", rest) and re.search(r"\bcharacter\b", rest)):
+        from . import dnd_beyond as _ddb
+        cid = _ddb.parse_character_id(getattr(event, "text", "") or "")
+        if not cid:
+            notify("[D&D] Give me your D&D Beyond character URL, e.g. 'mira use your dndbeyond "
+                   "character https://www.dndbeyond.com/characters/12345678' (set it to Public first).")
+            with _lock:
+                _active = True
+            return True
+        _ddb_import(event, cid, notify, speak)
         return True
 
     # ---- use / load a saved character (also enters mode) ----
@@ -452,11 +505,49 @@ def intercept(event, *, notify: Callable[[str], None], speak: Callable) -> bool:
 
     if not has_char:
         # In mode but no character: only creation/load commands (handled above) do anything.
-        if re.search(r"\b(roll|attack|cast|initiative|save|check|damage|heal)\b", rest):
-            notify("[D&D] No character yet — say 'mira create a character' or "
-                   "'mira use character <name>' first.")
+        if re.search(r"\b(roll|attack|cast|initiative|save|check|damage|heal|turn|options)\b", rest):
+            notify("[D&D] No character yet — say 'mira create a character', "
+                   "'mira use character <name>', or 'mira use your dndbeyond character <url>'.")
             return True
         return False
+
+    # ---- combat turn / action economy ----
+    if re.search(r"\b(start|begin|it'?s)\b.*\bturn\b", rest) or rest in ("my turn", "your turn"):
+        r = _char.start_turn()
+        notify("[turn] " + r)
+        notify(_char.turn_options())
+        _narrate(event, [r, _char.turn_options()], speak,
+                 flavor_note="it's your turn in combat; softly note what you're weighing up")
+        return True
+    if re.search(r"\b(end|finish|done with)\b.*\bturn\b", rest) or rest in ("end turn", "pass"):
+        notify("[turn] " + _char.end_turn())
+        _narrate(event, ["Your turn is over."], speak, flavor_note="quietly pass the turn on")
+        return True
+    if re.search(r"\bwhat can (you|i) do\b", rest) or re.search(r"\bwhat (are|s) (my|your) options\b", rest) \
+            or re.search(r"^(my |your )?options$", rest) or re.search(r"\bwhat'?s available\b", rest):
+        notify(_char.turn_options())
+        _narrate(event, [_char.turn_options()], speak,
+                 flavor_note="softly think aloud about what you could do this turn")
+        return True
+    m = re.search(r"\b(?:move|walk|run|step)\s+(\d+)\s*(?:ft|feet|foot)?\b", rest) \
+        or re.search(r"\b(\d+)\s*(?:ft|feet|foot)\b", rest)
+    if m and re.search(r"\b(move|walk|run|step|feet|ft|foot)\b", rest):
+        r = _char.spend_move(int(m.group(1)))
+        notify("[turn] " + r)
+        _narrate(event, [r], speak, flavor_note="quietly move into position")
+        return True
+    if re.search(r"\b(use|take)\b.*\breaction\b", rest) or rest.startswith("reaction"):
+        what = re.sub(r"^.*?reaction\s*(?:to |for |and )?", "", rest).strip() or "a reaction"
+        r = _char.use_reaction(what)
+        notify("[turn] " + r)
+        _narrate(event, [r], speak)
+        return True
+    m = re.search(r"^(?:i |i'?ll |we )?(?:take the |use )?(?P<act>dash|dodge|disengage)\b", rest)
+    if m:
+        r = _char.use_action(m.group("act").title())
+        notify("[turn] " + r)
+        _narrate(event, [r], speak, flavor_note="do it quietly, in character")
+        return True
 
     # play: engine rolls, she announces
     result = _do_roll(rest, _adv(rest))
@@ -531,12 +622,17 @@ def situation_note() -> str:
                     "anything, gently say you still need to make or pick a character first.")
         recent = " | ".join(_char.log[-3:]) if _char.log else "none yet"
         who = _char.short_summary()
+        weps = ", ".join(w["name"] for w in _char.weapons) or "unarmed"
+        spells = ", ".join(s["name"] for s in _char.spell_list) or "none"
+        turn = ("\nIt is your turn. " + _char.turn_options().replace("\n", " ")) if _char.in_turn else ""
     return (f"You are playing Dungeons & Dragons at the table as your character: {who}. A human DM "
-            f"runs the game. CRITICAL: you do NOT roll dice and you must NEVER say a die number, a "
-            f"to-hit or damage amount, or whether you hit, missed, succeeded, or failed. The game "
-            f"engine rolls everything. When you act, describe ONLY what your character ATTEMPTS "
-            f"(e.g. 'she swings her sword at it', 'I try to sneak past') and let the roll happen. "
-            f"Recent engine results (already announced): {recent}.")
+            f"runs the game. Your weapons: {weps}. Your spells: {spells}. On your turn you have an "
+            f"action, a bonus action, a reaction, and movement (per 5e). CRITICAL: you do NOT roll "
+            f"dice and you must NEVER say a die number, a to-hit or damage amount, or whether you "
+            f"hit, missed, succeeded, or failed — the engine rolls everything. When you act, "
+            f"describe ONLY what your character ATTEMPTS ('she swings her sword at it', 'I cast fire "
+            f"bolt at the goblin') and let the roll happen." + turn
+            + f"\nRecent engine results (already announced): {recent}.")
 
 
 def finalize_if_active(*, notify: Callable[[str], None]) -> None:
